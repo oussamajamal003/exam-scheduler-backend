@@ -11,7 +11,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
-app.use('/api', healthRoutes);
+app.use('/api', healthRoutes); 
 
 // Add future routes here (e.g. users, exams, rooms, students)
 // app.use('/api/users', userRoutes);
