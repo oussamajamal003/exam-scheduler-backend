@@ -16,14 +16,13 @@ model Center {
 }
 
 model CourseOffering {
-  id               Int             @id @default(autoincrement())
-  courseId         Int             @map("course_id")
-  semesterId       Int             @map("semester_id")
-  section          String?         @db.VarChar(20)
-  expectedStudents Int?            @default(0) @map("expected_students")
-  
-  course           Course          @relation(fields: [courseId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  semester         Semester        @relation(fields: [semesterId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id               Int            @id @default(autoincrement())
+  courseId         Int            @map("course_id")
+  semesterId       Int            @map("semester_id")
+  section          String?        @db.VarChar(20)
+  expectedStudents Int?           @default(0) @map("expected_students")
+  course           Course         @relation(fields: [courseId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   exams            Exam[]
   registrations    Registration[]
 
@@ -41,26 +40,23 @@ model Course {
 }
 
 model ExamRoomAssignment {
-  id      Int   @id @default(autoincrement())
-  examId  Int   @map("exam_id")
-  roomId  Int   @map("room_id")
-  
-  exam    Exam  @relation(fields: [examId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  room    Room  @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id     Int  @id @default(autoincrement())
+  examId Int  @map("exam_id")
+  roomId Int  @map("room_id")
+  exam   Exam @relation(fields: [examId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room   Room @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@map("exam_room_assignments")
 }
 
 model Exam {
-  id                    Int                     @id @default(autoincrement())
-  courseOfferingId      Int                     @map("course_offering_id")
-  timeSlotId            Int?                    @map("time_slot_id")
-  status                String?                 @default("draft") @db.VarChar(30)
-  
-  courseOffering        CourseOffering          @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  timeSlot              TimeSlot?               @relation(fields: [timeSlotId], references: [id], onUpdate: NoAction)
-  
+  id                    Int                    @id @default(autoincrement())
+  courseOfferingId      Int                    @map("course_offering_id")
+  timeSlotId            Int?                   @map("time_slot_id")
+  status                String?                @default("draft") @db.VarChar(30)
   examRoomAssignments   ExamRoomAssignment[]
+  courseOffering        CourseOffering         @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  timeSlot              TimeSlot?              @relation(fields: [timeSlotId], references: [id], onUpdate: NoAction)
   supervisorAssignments SupervisorAssignment[]
 
   @@map("exams")
@@ -70,9 +66,8 @@ model Registration {
   id               Int            @id @default(autoincrement())
   studentId        Int            @map("student_id")
   courseOfferingId Int            @map("course_offering_id")
-  
-  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([studentId, courseOfferingId])
   @@map("registrations")
@@ -84,9 +79,8 @@ model Room {
   roomName            String               @map("room_name") @db.VarChar(50)
   capacity            Int
   isAvailable         Boolean?             @default(true) @map("is_available")
-  
-  center              Center               @relation(fields: [centerId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   examRoomAssignments ExamRoomAssignment[]
+  center              Center               @relation(fields: [centerId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@map("rooms")
 }
@@ -102,11 +96,11 @@ model Semester {
 }
 
 model Student {
-  id             Int            @id @default(autoincrement())
-  universityId   String         @unique @map("university_id") @db.VarChar(30)
-  fullName       String         @map("full_name") @db.VarChar(150)
-  email          String?        @unique @db.VarChar(120)
-  registrations  Registration[]
+  id            Int            @id @default(autoincrement())
+  universityId  String         @unique @map("university_id") @db.VarChar(30)
+  fullName      String         @map("full_name") @db.VarChar(150)
+  email         String?        @unique @db.VarChar(120)
+  registrations Registration[]
 
   @@map("students")
 }
@@ -115,7 +109,6 @@ model SupervisorAssignment {
   id           Int        @id @default(autoincrement())
   examId       Int        @map("exam_id")
   supervisorId Int        @map("supervisor_id")
-  
   exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   supervisor   Supervisor @relation(fields: [supervisorId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -133,11 +126,11 @@ model Supervisor {
 }
 
 model TimeSlot {
-  id         Int      @id @default(autoincrement())
-  examDate   DateTime @map("exam_date") @db.Date
-  startTime  DateTime @map("start_time") @db.Time(6)
-  endTime    DateTime @map("end_time") @db.Time(6)
-  exams      Exam[]
+  id        Int      @id @default(autoincrement())
+  examDate  DateTime @map("exam_date") @db.Date
+  startTime DateTime @map("start_time") @db.Time(6)
+  endTime   DateTime @map("end_time") @db.Time(6)
+  exams     Exam[]
 
   @@map("time_slots")
 }
