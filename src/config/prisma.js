@@ -1,18 +1,18 @@
+import pkg from 'pg';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '@prisma/client';
+import { config } from './env.js';
 
-const { Pool } = require('pg');
-const { PrismaPg } = require('@prisma/adapter-pg');
-const { PrismaClient } = require('@prisma/client');
+const { Pool } = pkg;
 
-const connectionString = `${process.env.DATABASE_URL}`;
-
+const connectionString = config.dbUrl;
 const pool = new Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 
-// Prevent multiple instances in hot-reload
 const prisma = globalThis.prisma || new PrismaClient({ adapter });
 
 if (process.env.NODE_ENV !== 'production') {
   globalThis.prisma = prisma;
 }
 
-module.exports = prisma;
+export default prisma;

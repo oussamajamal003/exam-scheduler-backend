@@ -1,4 +1,4 @@
-import prisma from '../config/prisma';
+import prisma from '../config/prisma.js';
 
 // 1. Fetch exam schedule with relations
 export const getExamSchedules = async (req, res) => {

@@ -1,0 +1,239 @@
+openapi: 3.0.3
+info:
+  title: Exam Scheduler Auth API
+  version: 1.0.0
+  description: Authentication API documentation for the Smart Multi-Center Exam Scheduling System.
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
+        name:
+          type: string
+          example: John Doe
+        email:
+          type: string
+          format: email
+          example: john@example.com
+        role:
+          type: string
+          example: USER
+        createdAt:
+          type: string
+          format: date-time
+          example: 2026-04-06T12:00:00.000Z
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        user:
+          $ref: '#/components/schemas/User'
+        message:
+          type: string
+          example: User created successfully
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: john@example.com
+        password:
+          type: string
+          format: password
+          example: secret123
+    SignupRequest:
+      type: object
+      required:
+        - name
+        - email
+        - password
+      properties:
+        name:
+          type: string
+          example: John Doe
+        email:
+          type: string
+          format: email
+          example: john@example.com
+        password:
+          type: string
+          format: password
+          example: secret123
+paths:
+  /api/auth/:
+    get:
+      tags: [Auth]
+      summary: Get all users
+      description: Returns all registered users. Requires a valid JWT in the Authorization header.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+              examples:
+                success:
+                  value:
+                    - id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
+                      name: John Doe
+                      email: john@example.com
+                      role: USER
+                      createdAt: 2026-04-06T12:00:00.000Z
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              example:
+                success: false
+                error: Access denied. No token provided.
+  /api/auth/signup:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+            examples:
+              signup:
+                value:
+                  name: John Doe
+                  email: john@example.com
+                  password: secret123
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                success:
+                  value:
+                    message: User created successfully
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                    user:
+                      id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
+                      name: John Doe
+                      email: john@example.com
+                      role: USER
+                      createdAt: 2026-04-06T12:00:00.000Z
+        '409':
+          description: Email already exists
+          content:
+            application/json:
+              example:
+                message: User with this email already exists
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              login:
+                value:
+                  email: john@example.com
+                  password: secret123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                success:
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                    user:
+                      id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
+                      name: John Doe
+                      email: john@example.com
+                      role: USER
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              example:
+                message: Incorrect email or password
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout user
+      description: Logs out the authenticated user. Requires Bearer JWT in the Authorization header.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logged out successfully
+          content:
+            application/json:
+              example:
+                message: Logged out successfully
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              example:
+                success: false
+                error: Access denied. No token provided.
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              example:
+                success: false
+                error: Invalid or expired token.
+  /api/auth/delete:
+    delete:
+      tags: [Auth]
+      summary: Delete current user
+      description: Deletes the authenticated user. Requires Bearer JWT in the Authorization header.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: User deleted successfully
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              example:
+                success: false
+                error: Access denied. No token provided.
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              example:
+                success: false
+                error: You do not have permission to perform this action

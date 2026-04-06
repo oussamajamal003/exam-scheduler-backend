@@ -1,9 +1,5 @@
-import { config } from '../config/env.js';
+import { verifyToken } from '../utils/jwt.js';
 
-/**
- * Example JWT Authorization Middleware
- * Verifies the token from the Authorization header
- */
 export const authenticate = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -14,11 +10,22 @@ export const authenticate = (req, res, next) => {
   const token = authHeader.split(' ')[1];
 
   try {
-    // In a real application, you would use jsonwebtoken (jwt.verify)
-    // const decoded = jwt.verify(token, config.jwtSecret);
-    // req.user = decoded;
+    const decoded = verifyToken(token);
+    req.user = decoded;
     next();
   } catch (error) {
     res.status(403).json({ success: false, error: 'Invalid or expired token.' });
   }
+};
+
+export const restrictTo = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You do not have permission to perform this action',
+      });
+    }
+    next();
+  };
 };
