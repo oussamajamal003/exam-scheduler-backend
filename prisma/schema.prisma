@@ -6,145 +6,262 @@ datasource db {
   provider = "postgresql"
 }
 
-model User {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  password  String
-  role      Role     @default(USER)
-  createdAt DateTime @default(now())
-}
-
+// -----------------------------------
+// ENUMS
+// -----------------------------------
 enum Role {
-  ADMIN
-  USER
+  TECH_ADMIN
+  SCHEDULING_ADMIN
+  SUPERVISOR
+  STUDENT
 }
 
-model Center {
-  id       Int     @id @default(autoincrement())
-  name     String  @db.VarChar(100)
-  location String? @db.VarChar(150)
-  rooms    Room[]
-
-  @@map("centers")
+enum ExamStatus {
+  DRAFT
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
 }
 
-model CourseOffering {
-  id               Int            @id @default(autoincrement())
-  courseId         Int            @map("course_id")
-  semesterId       Int            @map("semester_id")
-  section          String?        @db.VarChar(20)
-  expectedStudents Int?           @default(0) @map("expected_students")
-  course           Course         @relation(fields: [courseId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  exams            Exam[]
-  registrations    Registration[]
-
-  @@map("course_offerings")
+enum ConflictType {
+  STUDENT_OVERLAP
+  SUPERVISOR_DOUBLE_BOOKED
+  ROOM_OVERCAPACITY
+  RESOURCE_UNAVAILABLE
+  TIME_CONSTRAINT_VIOLATION
 }
 
-model Course {
-  id              Int              @id @default(autoincrement())
-  code            String           @unique @db.VarChar(20)
-  title           String           @db.VarChar(150)
-  creditHours     Int?             @map("credit_hours")
-  courseOfferings CourseOffering[]
+// -----------------------------------
+// USER SYSTEM
+// -----------------------------------
+model User {
+  id         String      @id @default(uuid())
+  name       String
+  email      String      @unique
+  password   String
+  role       Role        @default(STUDENT)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  
+  student    Student?
+  supervisor Supervisor?
 
-  @@map("courses")
-}
-
-model ExamRoomAssignment {
-  id     Int  @id @default(autoincrement())
-  examId Int  @map("exam_id")
-  roomId Int  @map("room_id")
-  exam   Exam @relation(fields: [examId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  room   Room @relation(fields: [roomId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@map("exam_room_assignments")
-}
-
-model Exam {
-  id                    Int                    @id @default(autoincrement())
-  courseOfferingId      Int                    @map("course_offering_id")
-  timeSlotId            Int?                   @map("time_slot_id")
-  status                String?                @default("draft") @db.VarChar(30)
-  examRoomAssignments   ExamRoomAssignment[]
-  courseOffering        CourseOffering         @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  timeSlot              TimeSlot?              @relation(fields: [timeSlotId], references: [id], onUpdate: NoAction)
-  supervisorAssignments SupervisorAssignment[]
-
-  @@map("exams")
-}
-
-model Registration {
-  id               Int            @id @default(autoincrement())
-  studentId        Int            @map("student_id")
-  courseOfferingId Int            @map("course_offering_id")
-  courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@unique([studentId, courseOfferingId])
-  @@map("registrations")
-}
-
-model Room {
-  id                  Int                  @id @default(autoincrement())
-  centerId            Int                  @map("center_id")
-  roomName            String               @map("room_name") @db.VarChar(50)
-  capacity            Int
-  isAvailable         Boolean?             @default(true) @map("is_available")
-  examRoomAssignments ExamRoomAssignment[]
-  center              Center               @relation(fields: [centerId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@map("rooms")
-}
-
-model Semester {
-  id              Int              @id @default(autoincrement())
-  name            String           @db.VarChar(100)
-  startDate       DateTime?        @map("start_date") @db.Date
-  endDate         DateTime?        @map("end_date") @db.Date
-  courseOfferings CourseOffering[]
-
-  @@map("semesters")
+  @@map("users")
 }
 
 model Student {
-  id            Int            @id @default(autoincrement())
-  universityId  String         @unique @map("university_id") @db.VarChar(30)
-  fullName      String         @map("full_name") @db.VarChar(150)
-  email         String?        @unique @db.VarChar(120)
+  id           String       @id @default(uuid())
+  userId       String       @unique
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  programId    String?
+  program      Program?     @relation(fields: [programId], references: [id], onDelete: SetNull)
+  universityId String       @unique
+  
   registrations Registration[]
 
   @@map("students")
 }
 
-model SupervisorAssignment {
-  id           Int        @id @default(autoincrement())
-  examId       Int        @map("exam_id")
-  supervisorId Int        @map("supervisor_id")
-  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  supervisor   Supervisor @relation(fields: [supervisorId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@map("supervisor_assignments")
-}
-
 model Supervisor {
-  id                    Int                    @id @default(autoincrement())
-  fullName              String                 @map("full_name") @db.VarChar(150)
-  email                 String?                @unique @db.VarChar(120)
-  maxExamsPerDay        Int?                   @default(2) @map("max_exams_per_day")
-  supervisorAssignments SupervisorAssignment[]
+  id          String           @id @default(uuid())
+  userId      String           @unique
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  centerId    String
+  center      Center           @relation(fields: [centerId], references: [id], onDelete: Restrict)
+  
+  assignments ExamAssignment[]
 
   @@map("supervisors")
 }
 
+// -----------------------------------
+// MINI SIS (ACADEMIC DATA)
+// -----------------------------------
+model Program {
+  id        String    @id @default(uuid())
+  name      String
+  code      String    @unique
+  
+  students  Student[]
+  courses   Course[]
+
+  @@map("programs")
+}
+
+model Semester {
+  id              String           @id @default(uuid())
+  name            String           // e.g., "Fall 2026"
+  startDate       DateTime
+  endDate         DateTime
+  
+  courseOfferings CourseOffering[]
+
+  @@map("semesters")
+}
+
+model Course {
+  id              String           @id @default(uuid())
+  code            String           @unique
+  title           String
+  programId       String?
+  program         Program?         @relation(fields: [programId], references: [id], onDelete: SetNull)
+  
+  courseOfferings CourseOffering[]
+
+  @@map("courses")
+}
+
+model CourseOffering {
+  id               String         @id @default(uuid())
+  courseId         String
+  course           Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  semesterId       String
+  semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+  section          String?
+  expectedStudents Int            @default(0)
+  
+  registrations    Registration[]
+  exams            Exam[]
+
+  // A specific course section should only occur once per semester
+  @@unique([courseId, semesterId, section])
+  @@index([courseId])
+  @@index([semesterId])
+  @@map("course_offerings")
+}
+
+model Registration {
+  id               String         @id @default(uuid())
+  studentId        String
+  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  courseOfferingId String
+  courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
+
+  // Prevent duplicate enrollment for the exact same offering
+  @@unique([studentId, courseOfferingId])
+  @@index([studentId])
+  @@index([courseOfferingId])
+  @@map("registrations")
+}
+
+// -----------------------------------
+// RESOURCES
+// -----------------------------------
+model Center {
+  id          String       @id @default(uuid())
+  name        String       @unique
+  location    String?
+  
+  rooms       Room[]
+  supervisors Supervisor[]
+
+  @@map("centers")
+}
+
+model Room {
+  id          String           @id @default(uuid())
+  centerId    String
+  center      Center           @relation(fields: [centerId], references: [id], onDelete: Cascade)
+  name        String
+  capacity    Int
+  
+  assignments ExamAssignment[]
+
+  // Room names must be unique within a center
+  @@unique([centerId, name])
+  @@map("rooms")
+}
+
 model TimeSlot {
-  id        Int      @id @default(autoincrement())
-  examDate  DateTime @map("exam_date") @db.Date
-  startTime DateTime @map("start_time") @db.Time(6)
-  endTime   DateTime @map("end_time") @db.Time(6)
-  exams     Exam[]
+  id          String           @id @default(uuid())
+  startTime   DateTime
+  endTime     DateTime
+  
+  assignments ExamAssignment[]
 
   @@map("time_slots")
 }
+
+// -----------------------------------
+// EXAMS
+// -----------------------------------
+model Exam {
+  id               String           @id @default(uuid())
+  courseOfferingId String
+  courseOffering   CourseOffering   @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
+  status           ExamStatus       @default(DRAFT)
+  duration         Int?             // Duration in minutes
+  
+  assignments      ExamAssignment[]
+
+  @@index([courseOfferingId])
+  @@map("exams")
+}
+
+// -----------------------------------
+// SCHEDULING CORE
+// -----------------------------------
+model Schedule {
+  id          String           @id @default(uuid())
+  name        String
+  isFinal     Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  
+  assignments ExamAssignment[]
+  conflicts   Conflict[]
+
+  @@map("schedules")
+}
+
+model ExamAssignment {
+  id           String     @id @default(uuid())
+  scheduleId   String
+  schedule     Schedule   @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  
+  examId       String
+  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  
+  roomId       String
+  room         Room       @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  
+  supervisorId String
+  supervisor   Supervisor @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  
+  timeSlotId   String
+  timeSlot     TimeSlot   @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
+
+  // Prevents algorithm from generating duplicate identical assignments for the same schedule
+  @@unique([scheduleId, examId, roomId, supervisorId, timeSlotId])
+  @@index([scheduleId])
+  @@index([examId])
+  @@index([roomId])
+  @@map("exam_assignments")
+}
+
+// -----------------------------------
+// CONFLICT SYSTEM
+// -----------------------------------
+model Conflict {
+  id          String       @id @default(uuid())
+  scheduleId  String
+  schedule    Schedule     @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  
+  type        ConflictType
+  description String
+  resolved    Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+
+  @@index([scheduleId])
+  @@map("conflicts")
+}
+
+
+
+
+// Mini SIS → (Students, Courses, Enrollments)
+//       ↓
+// Scheduling → (Exams, TimeSlots, Rooms, Supervisors)
+//         ↓
+// Execution → (Schedule, Assignments, Conflicts)

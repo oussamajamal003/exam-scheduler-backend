@@ -3,7 +3,7 @@ import { generateToken } from '../utils/jwt.js';
 import { AppError } from '../utils/AppError.js';
 import * as UserModel from '../models/userModel.js';
 
-export const signupUser = async ({ name, email, password }) => {
+export const signupUser = async ({ name, email, password, role }) => {
   const existingUser = await UserModel.findUserByEmail(email);
 
   if (existingUser) {
@@ -12,13 +12,18 @@ export const signupUser = async ({ name, email, password }) => {
 
   const hashedPassword = await bcrypt.hash(password, 10);
 
+  // Default to STUDENT if no known role provided
+  const validRoles = ['TECH_ADMIN', 'SCHEDULING_ADMIN', 'SUPERVISOR', 'STUDENT'];
+  const userRole = validRoles.includes(role) ? role : 'STUDENT';
+
   const user = await UserModel.createUser({
     name,
     email,
     password: hashedPassword,
+    role: userRole,
   });
 
-  const token = generateToken(user.id, user.role);
+  const token = generateToken(user.id, userRole);
 
   return {
     message: 'User created successfully',
