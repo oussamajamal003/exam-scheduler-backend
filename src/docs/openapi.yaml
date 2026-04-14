@@ -1,11 +1,11 @@
-openapi: 3.0.3
+openapi: 3.0.0
 info:
-  title: Exam Scheduler Auth API
+  title: Smart Exam Scheduling System API
   version: 1.0.0
-  description: Authentication API documentation for the Smart Multi-Center Exam Scheduling System.
+  description: Exact API documentation mapping to currently existing endpoints for the Smart Exam Scheduling System.
 servers:
-  - url: http://localhost:5000
-    description: Local development server
+  - url: /api
+    description: Main API server
 components:
   securitySchemes:
     bearerAuth:
@@ -13,227 +13,1483 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
-    User:
+    ApiResponse:
       type: object
       properties:
-        id:
-          type: string
-          example: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
-        name:
-          type: string
-          example: John Doe
-        email:
-          type: string
-          format: email
-          example: john@example.com
-        role:
-          type: string
-          example: USER
-        createdAt:
-          type: string
-          format: date-time
-          example: 2026-04-06T12:00:00.000Z
-    AuthResponse:
-      type: object
-      properties:
-        token:
-          type: string
-          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-        user:
-          $ref: '#/components/schemas/User'
+        success:
+          type: boolean
         message:
           type: string
-          example: User created successfully
-    LoginRequest:
-      type: object
-      required:
-        - email
-        - password
-      properties:
-        email:
+        data:
+          type: object
+          nullable: true
+        error:
           type: string
-          format: email
-          example: john@example.com
-        password:
-          type: string
-          format: password
-          example: secret123
-    SignupRequest:
-      type: object
-      required:
-        - name
-        - email
-        - password
-      properties:
-        name:
-          type: string
-          example: John Doe
-        email:
-          type: string
-          format: email
-          example: john@example.com
-        password:
-          type: string
-          format: password
-          example: secret123
+          nullable: true
+security:
+  - bearerAuth: []
+tags:
+  - name: AI
+  - name: Auth
+  - name: Conflicts
+  - name: Courses
+  - name: Enrollments
+  - name: Exams
+  - name: Rooms
+  - name: Scheduling
+  - name: Students
+  - name: Supervisors
+  - name: TimeSlots
 paths:
-  /api/auth/:
-    get:
-      tags: [Auth]
-      summary: Get all users
-      description: Returns all registered users. Requires a valid JWT in the Authorization header.
-      security:
-        - bearerAuth: []
+  /ai/evaluate-schedule/{scheduleId}:
+    post:
+      tags: [AI]
+      summary: Evaluate schedule
+      parameters:
+        - in: path
+          name: scheduleId
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
       responses:
         '200':
-          description: List of users
+          description: Evaluated schedule
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/User'
-              examples:
-                success:
-                  value:
-                    - id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
-                      name: John Doe
-                      email: john@example.com
-                      role: USER
-                      createdAt: 2026-04-06T12:00:00.000Z
-        '401':
-          description: Unauthorized
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: AI schedule evaluation complete
+                data:
+                  score: 88
+                  metrics:
+                    studentConflicts: 0
+                    roomConflicts: 1
+                    supervisorConflicts: 0
+                    roomUtilization: 0.75
+                    supervisorLoadStdDev: 1.2
+                  issues: ["Room 101 capacity (40) is less than required seats (50) for exam 10."]
+                  suggestions: ["Move exam to a larger room or split students across additional sessions/rooms."]
+  /auth:
+    get:
+      tags: [Auth]
+      summary: Get all auth users
+      responses:
+        '200':
+          description: Users list
           content:
             application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
               example:
-                success: false
-                error: Access denied. No token provided.
-  /api/auth/signup:
+                success: true
+                message: Users fetched successfully
+                data:
+                  - id: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                    name: John Doe
+                    email: user@example.com
+                    role: STUDENT
+  /auth/signup:
     post:
       tags: [Auth]
       summary: Register a new user
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignupRequest'
-            examples:
-              signup:
-                value:
-                  name: John Doe
-                  email: john@example.com
-                  password: secret123
+              type: object
+              required: [name, email, password]
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+                  minLength: 6
+                role:
+                  type: string
+                  enum: [TECH_ADMIN, SCHEDULING_ADMIN, SUPERVISOR, STUDENT]
+            example:
+              name: string
+              email: user@example.com
+              password: string
+              role: STUDENT
       responses:
         '201':
-          description: User created successfully
+          description: User registered successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthResponse'
-              examples:
-                success:
-                  value:
-                    message: User created successfully
-                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-                    user:
-                      id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
-                      name: John Doe
-                      email: john@example.com
-                      role: USER
-                      createdAt: 2026-04-06T12:00:00.000Z
-        '409':
-          description: Email already exists
-          content:
-            application/json:
+                $ref: '#/components/schemas/ApiResponse'
               example:
-                message: User with this email already exists
-  /api/auth/login:
+                success: true
+                message: User registered successfully
+                data:
+                  id: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                  name: string
+                  email: user@example.com
+                  role: string
+  /auth/login:
     post:
       tags: [Auth]
       summary: Login user
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LoginRequest'
-            examples:
-              login:
-                value:
-                  email: john@example.com
-                  password: secret123
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+            example:
+              email: user@example.com
+              password: string
       responses:
         '200':
           description: Login successful
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthResponse'
-              examples:
-                success:
-                  value:
-                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-                    user:
-                      id: 3b6b8d45-7f25-4b62-9c8c-1ecf66a9f9ef
-                      name: John Doe
-                      email: john@example.com
-                      role: USER
-        '401':
-          description: Invalid credentials
-          content:
-            application/json:
+                $ref: '#/components/schemas/ApiResponse'
               example:
-                message: Incorrect email or password
-  /api/auth/logout:
+                success: true
+                message: Login successful
+                data:
+                  token: jwt_token_here
+                  user:
+                    id: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                    name: John Doe
+                    email: user@example.com
+                    role: STUDENT
+  /auth/logout:
     post:
       tags: [Auth]
       summary: Logout user
-      description: Logs out the authenticated user. Requires Bearer JWT in the Authorization header.
-      security:
-        - bearerAuth: []
       responses:
         '200':
-          description: Logged out successfully
+          description: Logged out
           content:
             application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
               example:
+                success: true
                 message: Logged out successfully
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              example:
-                success: false
-                error: Access denied. No token provided.
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              example:
-                success: false
-                error: Invalid or expired token.
-  /api/auth/delete:
+                data: null
+  /auth/delete:
     delete:
       tags: [Auth]
       summary: Delete current user
-      description: Deletes the authenticated user. Requires Bearer JWT in the Authorization header.
-      security:
-        - bearerAuth: []
       responses:
-        '204':
-          description: User deleted successfully
-        '401':
-          description: Unauthorized
+        '200':
+          description: User deleted
           content:
             application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
               example:
-                success: false
-                error: Access denied. No token provided.
-        '403':
-          description: Forbidden
+                success: true
+                message: User deleted successfully
+                data: null
+  /conflicts/detect:
+    post:
+      tags: [Conflicts]
+      summary: Detect schedule conflicts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduleId, type, description]
+              properties:
+                scheduleId:
+                  type: string
+                  format: uuid
+                type:
+                  type: string
+                  enum: [STUDENT_OVERLAP, SUPERVISOR_DOUBLE_BOOKED, ROOM_OVERCAPACITY, RESOURCE_UNAVAILABLE, TIME_CONSTRAINT_VIOLATION]
+                description:
+                  type: string
+                  minLength: 1
+                resolved:
+                  type: boolean
+            example:
+              scheduleId: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+              type: ROOM_OVERCAPACITY
+              description: Room capacity is below enrolled students count
+              resolved: false
+      responses:
+        '200':
+          description: Conflict detection result
           content:
             application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
               example:
-                success: false
-                error: You do not have permission to perform this action
+                success: true
+                message: Conflicts detected successfully
+                data:
+                  conflicts:
+                    - type: ROOM_CONFLICT
+                      examId: 6b38bf76-1594-4224-9c8e-aa8a5f73aa27
+                      roomId: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+  /courses:
+    get:
+      tags: [Courses]
+      summary: Get all courses
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: CS
+        - in: query
+          name: programId
+          schema:
+            type: string
+            format: uuid
+          example: 4fdf7142-120a-4eec-a681-4a86561f53d6
+      responses:
+        '200':
+          description: Course list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Courses fetched successfully
+                data:
+                  - id: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                    code: CS101
+                    title: Introduction to Programming
+    post:
+      tags: [Courses]
+      summary: Create new course
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, title]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+                title:
+                  type: string
+                  minLength: 1
+                programId:
+                  type: string
+                  format: uuid
+            example:
+              code: CS101
+              title: Introduction to Programming
+              programId: 4fdf7142-120a-4eec-a681-4a86561f53d6
+      responses:
+        '201':
+          description: Course created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Course created successfully
+                data:
+                  id: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                  code: CS101
+                  title: Introduction to Programming
+  /courses/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+    get:
+      tags: [Courses]
+      summary: Get course by ID
+      responses:
+        '200':
+          description: Course found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Course fetched successfully
+                data:
+                  id: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                  code: CS101
+                  title: Introduction to Programming
+    put:
+      tags: [Courses]
+      summary: Update course
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+                title:
+                  type: string
+                  minLength: 1
+                programId:
+                  type: string
+                  format: uuid
+            example:
+              title: Intro to Programming - Updated
+      responses:
+        '200':
+          description: Course updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Course updated successfully
+                data:
+                  id: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                  title: Intro to Programming - Updated
+    delete:
+      tags: [Courses]
+      summary: Delete course
+      responses:
+        '200':
+          description: Course deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Course deleted successfully
+                data: null
+  /enrollments:
+    get:
+      tags: [Enrollments]
+      summary: Get all enrollments
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: CS
+        - in: query
+          name: studentId
+          schema:
+            type: string
+            format: uuid
+          example: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+        - in: query
+          name: courseOfferingId
+          schema:
+            type: string
+            format: uuid
+          example: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+        - in: query
+          name: semesterId
+          schema:
+            type: string
+            format: uuid
+          example: 5bfe5c56-37f2-4e0e-8e1d-21365e34714a
+        - in: query
+          name: courseId
+          schema:
+            type: string
+            format: uuid
+          example: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+      responses:
+        '200':
+          description: Enrollment list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Enrollments fetched successfully
+                data:
+                  - id: da632032-6408-4f7d-94d1-d7344e4f0868
+                    studentId: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                    courseId: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+    post:
+      tags: [Enrollments]
+      summary: Create enrollment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [studentId, courseOfferingId]
+              properties:
+                studentId:
+                  type: string
+                  format: uuid
+                courseOfferingId:
+                  type: string
+                  format: uuid
+            example:
+              studentId: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+              courseOfferingId: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+      responses:
+        '201':
+          description: Enrollment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Enrollment created successfully
+                data:
+                  id: da632032-6408-4f7d-94d1-d7344e4f0868
+                  studentId: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                  courseOfferingId: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+  /enrollments/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: da632032-6408-4f7d-94d1-d7344e4f0868
+    delete:
+      tags: [Enrollments]
+      summary: Delete enrollment
+      responses:
+        '200':
+          description: Enrollment deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Enrollment deleted successfully
+                data: null
+  /exams:
+    get:
+      tags: [Exams]
+      summary: Get all exams
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: draft
+        - in: query
+          name: courseOfferingId
+          schema:
+            type: string
+            format: uuid
+          example: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+        - in: query
+          name: scheduleId
+          schema:
+            type: string
+            format: uuid
+          example: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [DRAFT, SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED]
+          example: SCHEDULED
+      responses:
+        '200':
+          description: Exams list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Exams fetched successfully
+                data:
+                  - id: 6b38bf76-1594-4224-9c8e-aa8a5f73aa27
+                    courseOfferingId: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                    status: SCHEDULED
+                    duration: 120
+  /exams/generate-from-courses:
+    post:
+      tags: [Exams]
+      summary: Generate exams from existing courses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [semesterId]
+              properties:
+                semesterId:
+                  type: string
+                  format: uuid
+            example:
+              semesterId: 5bfe5c56-37f2-4e0e-8e1d-21365e34714a
+      responses:
+        '201':
+          description: Exams generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Exams generated from courses
+                data:
+                  generated: 12
+  /exams/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 6b38bf76-1594-4224-9c8e-aa8a5f73aa27
+    get:
+      tags: [Exams]
+      summary: Get exam by ID
+      responses:
+        '200':
+          description: Exam found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Exam fetched successfully
+                data:
+                  id: 6b38bf76-1594-4224-9c8e-aa8a5f73aa27
+                  courseOfferingId: 11f72de8-8707-4c6b-afca-ee8f88f5ea0c
+                  status: SCHEDULED
+                  duration: 120
+  /rooms:
+    get:
+      tags: [Rooms]
+      summary: Get all rooms
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: A
+        - in: query
+          name: centerId
+          schema:
+            type: string
+            format: uuid
+          example: d2a32d4f-d226-4244-8383-6bb65f453eb7
+        - in: query
+          name: minCapacity
+          schema:
+            type: integer
+            minimum: 1
+          example: 30
+      responses:
+        '200':
+          description: Rooms list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Rooms fetched successfully
+                data:
+                  - id: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+                    name: A-101
+                    capacity: 60
+    post:
+      tags: [Rooms]
+      summary: Create new room
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [centerId, name, capacity]
+              properties:
+                centerId:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+                  minLength: 1
+                capacity:
+                  type: integer
+                  minimum: 1
+            example:
+              name: A-101
+              capacity: 60
+              centerId: d2a32d4f-d226-4244-8383-6bb65f453eb7
+      responses:
+        '201':
+          description: Room created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Room created successfully
+                data:
+                  id: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+                  name: A-101
+                  capacity: 60
+  /rooms/available:
+    get:
+      tags: [Rooms]
+      summary: Get available rooms
+      responses:
+        '200':
+          description: Available rooms list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Available rooms fetched successfully
+                data:
+                  - id: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+                    name: A-101
+                    capacity: 60
+  /rooms/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+    get:
+      tags: [Rooms]
+      summary: Get room by ID
+      responses:
+        '200':
+          description: Room found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Room fetched successfully
+                data:
+                  id: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+                  name: A-101
+                  capacity: 60
+    put:
+      tags: [Rooms]
+      summary: Update room
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                centerId:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+                  minLength: 1
+                capacity:
+                  type: integer
+                  minimum: 1
+            example:
+              capacity: 80
+      responses:
+        '200':
+          description: Room updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Room updated successfully
+                data:
+                  id: f3438f41-7fa6-466f-a270-aa5ecb4db9bc
+                  capacity: 80
+    delete:
+      tags: [Rooms]
+      summary: Delete room
+      responses:
+        '200':
+          description: Room deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Room deleted successfully
+                data: null
+  /scheduling/prepare:
+    post:
+      tags: [Scheduling]
+      summary: Prepare scheduling
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [semesterId, startDate, endDate]
+              properties:
+                semesterId:
+                  type: string
+                  format: uuid
+                startDate:
+                  type: string
+                  format: date-time
+                endDate:
+                  type: string
+                  format: date-time
+            example:
+              semesterId: 5bfe5c56-37f2-4e0e-8e1d-21365e34714a
+              startDate: '2026-06-01T08:00:00.000Z'
+              endDate: '2026-06-30T18:00:00.000Z'
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Scheduling data prepared
+                data:
+                  totalExams: 120
+                  totalRooms: 35
+  /scheduling/validate-input:
+    post:
+      tags: [Scheduling]
+      summary: Validate scheduling input
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [semesterId]
+              properties:
+                semesterId:
+                  type: string
+                  format: uuid
+            example:
+              semesterId: 5bfe5c56-37f2-4e0e-8e1d-21365e34714a
+      responses:
+        '200':
+          description: Validation ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Input validation passed
+                data:
+                  valid: true
+  /scheduling/generate:
+    post:
+      tags: [Scheduling]
+      summary: Generate schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [semesterId, scheduleName]
+              properties:
+                semesterId:
+                  type: string
+                  format: uuid
+                scheduleName:
+                  type: string
+                  minLength: 3
+            example:
+              semesterId: 5bfe5c56-37f2-4e0e-8e1d-21365e34714a
+              scheduleName: Spring 2026 Final Schedule
+      responses:
+        '200':
+          description: Generation triggered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Schedule generated successfully
+                data:
+                  scheduleId: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+  /scheduling/{id}/analysis:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+    get:
+      tags: [Scheduling]
+      summary: Get schedule analysis
+      responses:
+        '200':
+          description: Analysis returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Analysis fetched successfully
+                data:
+                  id: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+                  conflictCount: 0
+                  utilization: 0.82
+  /scheduling/{id}/publish:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+    patch:
+      tags: [Scheduling]
+      summary: Publish schedule
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+            example: {}
+      responses:
+        '200':
+          description: Schedule published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Schedule published successfully
+                data:
+                  id: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+                  status: PUBLISHED
+  /students:
+    get:
+      tags: [Students]
+      summary: Get all students
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: john
+        - in: query
+          name: programId
+          schema:
+            type: string
+            format: uuid
+          example: 4fdf7142-120a-4eec-a681-4a86561f53d6
+      responses:
+        '200':
+          description: Students list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Students fetched successfully
+                data:
+                  - id: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                    userId: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                    programId: 4fdf7142-120a-4eec-a681-4a86561f53d6
+    post:
+      tags: [Students]
+      summary: Create new student
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, universityId]
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+                universityId:
+                  type: string
+                  minLength: 3
+                programId:
+                  type: string
+                  format: uuid
+            example:
+              userId: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+              universityId: U2026001
+              programId: 4fdf7142-120a-4eec-a681-4a86561f53d6
+      responses:
+        '201':
+          description: Student created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Student created successfully
+                data:
+                  id: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                  userId: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                  universityId: U2026001
+                  programId: 4fdf7142-120a-4eec-a681-4a86561f53d6
+  /students/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+    get:
+      tags: [Students]
+      summary: Get student by ID
+      responses:
+        '200':
+          description: Student found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Student fetched successfully
+                data:
+                  id: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                  userId: 8f3c4ca8-a9e9-4d1f-a875-9d7f940ca6f3
+                  universityId: U2026001
+    put:
+      tags: [Students]
+      summary: Update student
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                universityId:
+                  type: string
+                  minLength: 3
+                programId:
+                  type: string
+                  format: uuid
+            example:
+              universityId: U2026999
+              programId: 9e7e8e16-f4b7-4ee7-a579-f8f58f7f339a
+      responses:
+        '200':
+          description: Student updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Student updated successfully
+                data:
+                  id: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+                  programId: 9e7e8e16-f4b7-4ee7-a579-f8f58f7f339a
+    delete:
+      tags: [Students]
+      summary: Delete student
+      responses:
+        '200':
+          description: Student deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Student deleted successfully
+                data: null
+  /students/{id}/exams:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 88dad4ad-d6f0-498f-8d57-26613200f9d7
+    get:
+      tags: [Students]
+      summary: Get student exams
+      responses:
+        '200':
+          description: Student exams returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Student exams fetched successfully
+                data:
+                  - examId: 6b38bf76-1594-4224-9c8e-aa8a5f73aa27
+                    courseCode: CS101
+                    examDate: '2026-06-18'
+  /supervisors:
+    get:
+      tags: [Supervisors]
+      summary: Get all supervisors
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: jane
+        - in: query
+          name: centerId
+          schema:
+            type: string
+            format: uuid
+          example: d2a32d4f-d226-4244-8383-6bb65f453eb7
+        - in: query
+          name: userId
+          schema:
+            type: string
+            format: uuid
+          example: 715f4f0b-662f-4e8a-8600-b7c8328f7ca8
+      responses:
+        '200':
+          description: Supervisors list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisors fetched successfully
+                data:
+                  - id: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+                    userId: 715f4f0b-662f-4e8a-8600-b7c8328f7ca8
+                    centerId: d2a32d4f-d226-4244-8383-6bb65f453eb7
+    post:
+      tags: [Supervisors]
+      summary: Create new supervisor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, centerId]
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+                centerId:
+                  type: string
+                  format: uuid
+            example:
+              userId: 715f4f0b-662f-4e8a-8600-b7c8328f7ca8
+              centerId: d2a32d4f-d226-4244-8383-6bb65f453eb7
+      responses:
+        '201':
+          description: Supervisor created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisor created successfully
+                data:
+                  id: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+                  userId: 715f4f0b-662f-4e8a-8600-b7c8328f7ca8
+                  centerId: d2a32d4f-d226-4244-8383-6bb65f453eb7
+  /supervisors/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+    get:
+      tags: [Supervisors]
+      summary: Get supervisor by ID
+      responses:
+        '200':
+          description: Supervisor found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisor fetched successfully
+                data:
+                  id: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+                  userId: 715f4f0b-662f-4e8a-8600-b7c8328f7ca8
+    put:
+      tags: [Supervisors]
+      summary: Update supervisor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+                centerId:
+                  type: string
+                  format: uuid
+            example:
+              centerId: 4628ecb0-f37e-43d8-b8ff-9f90ea7095f7
+      responses:
+        '200':
+          description: Supervisor updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisor updated successfully
+                data:
+                  id: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+                  centerId: 4628ecb0-f37e-43d8-b8ff-9f90ea7095f7
+    delete:
+      tags: [Supervisors]
+      summary: Delete supervisor
+      responses:
+        '200':
+          description: Supervisor deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisor deleted successfully
+                data: null
+  /supervisors/{id}/workload:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+    get:
+      tags: [Supervisors]
+      summary: Get supervisor workload
+      responses:
+        '200':
+          description: Supervisor workload returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Supervisor workload fetched successfully
+                data:
+                  supervisorId: 3ac5ec87-91d2-4776-85e4-2ce92a853f7e
+                  assignedExams: 4
+  /timeslots:
+    get:
+      tags: [TimeSlots]
+      summary: Get all timeslots
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+          example: morning
+        - in: query
+          name: startFrom
+          schema:
+            type: string
+            format: date-time
+          example: '2026-06-01T08:00:00.000Z'
+        - in: query
+          name: endTo
+          schema:
+            type: string
+            format: date-time
+          example: '2026-06-30T18:00:00.000Z'
+        - in: query
+          name: scheduleId
+          schema:
+            type: string
+            format: uuid
+          example: 2f4c8b8a-1f90-4ab8-a66d-5a2ebfd2f1c2
+      responses:
+        '200':
+          description: Timeslots list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Time slots fetched successfully
+                data:
+                  - id: 4fbff334-bc79-4f7d-bf2e-77ceb5f898d7
+                    startTime: '2026-06-18T09:00:00.000Z'
+                    endTime: '2026-06-18T12:00:00.000Z'
+    post:
+      tags: [TimeSlots]
+      summary: Create new timeslot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startTime, endTime]
+              properties:
+                startTime:
+                  type: string
+                  format: date-time
+                endTime:
+                  type: string
+                  format: date-time
+            example:
+              startTime: '2026-06-18T09:00:00.000Z'
+              endTime: '2026-06-18T12:00:00.000Z'
+      responses:
+        '201':
+          description: Timeslot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Time slot created successfully
+                data:
+                  id: 4fbff334-bc79-4f7d-bf2e-77ceb5f898d7
+                  startTime: '2026-06-18T09:00:00.000Z'
+                  endTime: '2026-06-18T12:00:00.000Z'
+  /timeslots/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        example: 4fbff334-bc79-4f7d-bf2e-77ceb5f898d7
+    get:
+      tags: [TimeSlots]
+      summary: Get timeslot by ID
+      responses:
+        '200':
+          description: Timeslot found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Time slot fetched successfully
+                data:
+                  id: 4fbff334-bc79-4f7d-bf2e-77ceb5f898d7
+                  startTime: '2026-06-18T09:00:00.000Z'
+                  endTime: '2026-06-18T12:00:00.000Z'
+    put:
+      tags: [TimeSlots]
+      summary: Update timeslot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startTime:
+                  type: string
+                  format: date-time
+                endTime:
+                  type: string
+                  format: date-time
+            example:
+              startTime: '2026-06-18T10:00:00.000Z'
+              endTime: '2026-06-18T13:00:00.000Z'
+      responses:
+        '200':
+          description: Timeslot updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Time slot updated successfully
+                data:
+                  id: 4fbff334-bc79-4f7d-bf2e-77ceb5f898d7
+                  startTime: '2026-06-18T10:00:00.000Z'
+                  endTime: '2026-06-18T13:00:00.000Z'
+    delete:
+      tags: [TimeSlots]
+      summary: Delete timeslot
+      responses:
+        '200':
+          description: Timeslot deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: true
+                message: Time slot deleted successfully
+                data: null
+

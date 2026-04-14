@@ -6,7 +6,7 @@ export const authGuard = (req, res, next) => {
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({
       success: false,
-      error: 'Access denied. No token provided.',
+      message: 'Access denied. No token provided.',
     });
   }
 
@@ -14,12 +14,13 @@ export const authGuard = (req, res, next) => {
 
   try {
     const decoded = verifyToken(token);
-    req.user = decoded;
+    req.user = decoded; // Contains id and role
     next();
   } catch (error) {
     return res.status(403).json({
       success: false,
-      error: 'Invalid or expired token.',
+      message: 'Invalid or expired token.',
     });
   }
 };
+

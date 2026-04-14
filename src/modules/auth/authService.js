@@ -1,7 +1,7 @@
 import bcrypt from 'bcrypt';
-import { generateToken } from '../utils/jwt.js';
-import { AppError } from '../utils/AppError.js';
-import * as UserModel from '../models/userModel.js';
+import { generateToken } from '../../utils/jwt.js';
+import { AppError } from '../../utils/AppError.js';
+import * as UserModel from '../../models/userModel.js';
 
 export const signupUser = async ({ name, email, password, role }) => {
   const existingUser = await UserModel.findUserByEmail(email);

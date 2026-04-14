@@ -11,7 +11,6 @@
   "dependencies": {
     "@prisma/adapter-pg": "^7.6.0",
     "@prisma/client": "^7.6.0",
-    "@types/node": "^25.5.2",
     "@types/pg": "^8.20.0",
     "bcrypt": "^6.0.0",
     "connect-livereload": "^0.6.1",
@@ -20,6 +19,8 @@
     "jsonwebtoken": "^9.0.3",
     "livereload": "^0.10.3",
     "pg": "^8.20.0",
+    "swagger-autogen": "^2.23.7",
+    "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "yamljs": "^0.3.0",
     "zod": "^4.3.6"

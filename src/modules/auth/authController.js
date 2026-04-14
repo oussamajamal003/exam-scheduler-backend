@@ -1,4 +1,4 @@
-import { signupUser, loginUser, fetchAllUsers, removeUser } from '../services/authService.js';
+import { signupUser, loginUser, fetchAllUsers, removeUser } from './authService.js';
 
 export const signup = async (req, res, next) => {
   try {
