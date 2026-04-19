@@ -10,14 +10,20 @@ export const getSupervisorSchema = uuidParamSchema;
 
 export const createSupervisorSchema = z.object({
   body: z.object({
-    userId: z.string().uuid(),
-    centerId: z.string().uuid(),
+    userId: z.string().uuid().optional(),
+    centerId: z.string().uuid().optional(),
+    name: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+    center: z.string().min(1).optional(),
   }),
 });
 
 export const updateSupervisorSchema = z.object({
   params: uuidParamSchema.shape.params,
   body: z.object({
+    name: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+    center: z.string().min(1).optional(),
     userId: z.string().uuid().optional(),
     centerId: z.string().uuid().optional(),
   }),

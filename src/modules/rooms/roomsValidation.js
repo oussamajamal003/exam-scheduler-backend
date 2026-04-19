@@ -10,18 +10,22 @@ export const getRoomSchema = uuidParamSchema;
 
 export const createRoomSchema = z.object({
   body: z.object({
-    centerId: z.string().uuid(),
-    name: z.string().min(1),
-    capacity: z.number().int().positive(),
+    center: z.string().min(2).optional(),
+    centerId: z.string().uuid().optional(),
+    name: z.string().min(2),
+    capacity: z.coerce.number().int().positive(),
+    status: z.enum(['Available', 'Maintenance']).optional().default('Available'),
   }),
 });
 
 export const updateRoomSchema = z.object({
   params: uuidParamSchema.shape.params,
   body: z.object({
+    center: z.string().min(1).optional(),
     centerId: z.string().uuid().optional(),
     name: z.string().min(1).optional(),
-    capacity: z.number().int().positive().optional(),
+    capacity: z.coerce.number().int().positive().optional(),
+    status: z.enum(['Available', 'Maintenance']).optional(),
   }),
 });
 

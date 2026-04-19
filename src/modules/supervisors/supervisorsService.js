@@ -60,8 +60,32 @@ export const getById = async (id) => {
 };
 
 export const create = async (data) => {
+  let { userId, centerId, name, email, center, ...rest } = data;
+  
+  if (!userId && (name && email)) {
+    const user = await prisma.user.upsert({
+      where: { email },
+      update: { name, role: 'SUPERVISOR' },
+      create: { name, email, password: 'password123', role: 'SUPERVISOR' }
+    });
+    userId = user.id;
+  }
+  
+  if (!centerId && center) {
+    const centerRecord = await prisma.center.upsert({
+      where: { name: center },
+      update: {},
+      create: { name: center }
+    });
+    centerId = centerRecord.id;
+  }
+  
+  if (!userId || !centerId) {
+    throw new AppError('Unable to resolve user or center for supervisor', 400);
+  }
+  
   return await prisma.supervisor.create({
-    data,
+    data: { ...rest, userId, centerId },
     include: {
       user: { select: { id: true, name: true, email: true, role: true } },
       center: true,
@@ -70,9 +94,32 @@ export const create = async (data) => {
 };
 
 export const update = async (id, data) => {
+  let { userId, centerId, name, email, center, ...rest } = data;
+  const updatePayload = { ...rest };
+  
+  const existing = await prisma.supervisor.findUnique({ where: { id }, select: { userId: true } });
+  
+  if (name || email) {
+    await prisma.user.update({
+      where: { id: existing.userId },
+      data: { ...(name && { name }), ...(email && { email }) }
+    });
+  }
+
+  if (center) {
+    const centerRecord = await prisma.center.upsert({
+      where: { name: center },
+      update: {},
+      create: { name: center }
+    });
+    updatePayload.centerId = centerRecord.id;
+  } else if (centerId) {
+    updatePayload.centerId = centerId;
+  }
+  
   return await prisma.supervisor.update({
     where: { id },
-    data,
+    data: updatePayload,
     include: {
       user: { select: { id: true, name: true, email: true, role: true } },
       center: true,
