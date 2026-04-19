@@ -7,8 +7,8 @@ import {
   getRoomSchema,
   getRoomsSchema,
   updateRoomSchema,
-} from './validation.js';
-import * as controller from './controller.js';
+} from './roomsValidation.js';
+import * as controller from './roomsController.js';
 
 const router = express.Router();
 router.use(authGuard);

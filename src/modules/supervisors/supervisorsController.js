@@ -1,4 +1,4 @@
-import * as service from './service.js';
+import * as service from './supervisorsService.js';
 import { sendResponse } from '../../utils/response.js';
 import { catchAsync } from '../../utils/catchAsync.js';
 

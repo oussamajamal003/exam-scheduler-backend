@@ -7,8 +7,8 @@ import {
   getCourseSchema,
   getCoursesSchema,
   updateCourseSchema,
-} from './validation.js';
-import * as controller from './controller.js';
+} from './coursesValidation.js';
+import * as controller from './coursesController.js';
 
 const router = express.Router();
 router.use(authGuard);

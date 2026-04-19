@@ -1,4 +1,5 @@
 import prisma from '../../config/prisma.js';
+import bcrypt from 'bcrypt';
 import { AppError } from '../../utils/AppError.js';
 
 export const getAllStudents = async (query) => {
@@ -56,19 +57,102 @@ export const createStudent = async (data) => {
   const existing = await prisma.student.findUnique({ where: { universityId: data.universityId } });
   if (existing) throw new AppError('University ID already in use', 400);
 
-  return await prisma.student.create({
-    data,
-    include: { user: true }
+  // Support two create flows:
+  // 1) Direct relation: userId + universityId (+ programId)
+  // 2) Admin UI profile payload: firstName + lastName + email + universityId (+ programId)
+  if (data.userId) {
+    return await prisma.student.create({
+      data: {
+        userId: data.userId,
+        universityId: data.universityId,
+        programId: data.programId,
+      },
+      include: { user: true, program: true }
+    });
+  }
+
+  const fullName = `${data.firstName} ${data.lastName}`.trim();
+
+  const existingUser = await prisma.user.findUnique({ where: { email: data.email } });
+  if (existingUser) throw new AppError('User with this email already exists', 409);
+
+  const tempPassword = `${data.universityId}@Temp123`;
+  const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+  return await prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({
+      data: {
+        name: fullName,
+        email: data.email,
+        password: hashedPassword,
+        role: 'STUDENT',
+      },
+    });
+
+    return await tx.student.create({
+      data: {
+        userId: user.id,
+        universityId: data.universityId,
+        programId: data.programId,
+      },
+      include: { user: true, program: true }
+    });
   });
 };
 
 export const updateStudent = async (id, data) => {
-  const student = await prisma.student.findUnique({ where: { id } });
+  const student = await prisma.student.findUnique({
+    where: { id },
+    include: { user: true },
+  });
   if (!student) throw new AppError('Student not found', 404);
+
+  if (data.universityId) {
+    const duplicate = await prisma.student.findUnique({ where: { universityId: data.universityId } });
+    if (duplicate && duplicate.id !== id) {
+      throw new AppError('University ID already in use', 400);
+    }
+  }
+
+  const nextStudentData = {
+    universityId: data.universityId ?? student.universityId,
+    programId: data.programId ?? student.programId ?? null,
+  };
+
+  if (data.firstName || data.lastName || data.email) {
+    const nextName = [data.firstName ?? student.user.name?.split(' ')[0] ?? '', data.lastName ?? student.user.name?.split(' ').slice(1).join(' ') ?? '']
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    if (data.email && data.email !== student.user.email) {
+      const duplicateUser = await prisma.user.findUnique({ where: { email: data.email } });
+      if (duplicateUser && duplicateUser.id !== student.userId) {
+        throw new AppError('User with this email already exists', 409);
+      }
+    }
+
+    return await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: student.userId },
+        data: {
+          ...(nextName ? { name: nextName } : {}),
+          ...(data.email ? { email: data.email } : {}),
+        },
+      });
+
+      return await tx.student.update({
+        where: { id },
+        data: nextStudentData,
+        include: { user: true, program: true },
+      });
+    });
+  }
 
   return await prisma.student.update({
     where: { id },
-    data,
+    data: nextStudentData,
+    include: { user: true, program: true },
   });
 };
 

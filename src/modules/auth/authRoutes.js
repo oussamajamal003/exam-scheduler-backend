@@ -2,7 +2,7 @@ import express from 'express';
 import { signup, login, logout, getAllUsers, deleteUser } from './authController.js';
 import { authGuard } from '../../guards/authguard.js';
 import { validate } from '../../middlewares/validate.js';
-import { loginSchema, signupSchema } from './validation.js';
+import { loginSchema, signupSchema } from './authValidation.js';
 
 const router = express.Router();
 

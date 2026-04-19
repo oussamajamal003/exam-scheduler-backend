@@ -1,6 +1,6 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
-import { detect } from '../conflicts/service.js';
+import { detect } from '../conflicts/conflictsService.js';
 
 export const evaluateSchedule = async (scheduleId) => {
   if (!scheduleId) throw new AppError('scheduleId is required', 400);

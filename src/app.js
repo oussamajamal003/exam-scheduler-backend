@@ -20,14 +20,14 @@ app.use(express.urlencoded({ extended: true }));
 import authRoutes from './modules/auth/authRoutes.js';
 import studentRoutes from './modules/students/studentRoutes.js';
 import schedulingRoutes from './modules/scheduling/schedulingRoutes.js';
-import supervisorRoutes from './modules/supervisors/routes.js';
-import roomRoutes from './modules/rooms/routes.js';
-import courseRoutes from './modules/courses/routes.js';
-import examRoutes from './modules/exams/routes.js';
-import timeSlotRoutes from './modules/timeslots/routes.js';
-import enrollmentRoutes from './modules/enrollments/routes.js';
-import conflictRoutes from './modules/conflicts/routes.js';
-import aiRoutes from './modules/ai/routes.js';
+import supervisorRoutes from './modules/supervisors/supervisorsRoutes.js';
+import roomRoutes from './modules/rooms/roomsRoutes.js';
+import courseRoutes from './modules/courses/coursesRoutes.js';
+import examRoutes from './modules/exams/examsRoutes.js';
+import timeSlotRoutes from './modules/timeslots/timeslotsRoutes.js';
+import enrollmentRoutes from './modules/enrollments/enrollmentsRoutes.js';
+import conflictRoutes from './modules/conflicts/conflictsRoutes.js';
+import aiRoutes from './modules/ai/aiRoutes.js';
 
 // Routes (existing)
 app.use('/api/auth', authRoutes);

@@ -1,18 +1,64 @@
 import { z } from 'zod';
 
 export const createStudentSchema = z.object({
-  body: z.object({
-    userId: z.string().uuid(),
-    universityId: z.string().min(3),
-    programId: z.string().uuid().optional(),
-  }),
+  body: z.union([
+    z.object({
+      userId: z.string().uuid(),
+      universityId: z
+        .string()
+        .min(1, "University ID is required")
+        .regex(/^\d+$/, "University ID must contain only numbers"),
+      programId: z.string().uuid().optional(),
+    }),
+    z.object({
+      firstName: z
+        .string()
+        .min(2, "First name must be at least 2 characters")
+        .regex(/^[a-zA-Z\s]+$/, "First name must contain only letters"),
+      lastName: z
+        .string()
+        .min(2, "Last name must be at least 2 characters")
+        .regex(/^[a-zA-Z\s]+$/, "Last name must contain only letters"),
+      email: z.string().email("Invalid email address"),
+      universityId: z
+        .string()
+        .min(1, "University ID is required")
+        .regex(/^\d+$/, "University ID must contain only numbers"),
+      programId: z.string().uuid().optional(),
+    }),
+  ]),
 });
 
 export const updateStudentSchema = z.object({
-  body: z.object({
-    universityId: z.string().min(3).optional(),
-    programId: z.string().uuid().optional(),
-  }),
+  body: z.union([
+    z.object({
+      universityId: z
+        .string()
+        .min(1, "University ID is required")
+        .regex(/^\d+$/, "University ID must contain only numbers")
+        .optional(),
+      programId: z.string().uuid().optional(),
+    }),
+    z.object({
+      firstName: z
+        .string()
+        .min(2, "First name must be at least 2 characters")
+        .regex(/^[a-zA-Z\s]+$/, "First name must contain only letters")
+        .optional(),
+      lastName: z
+        .string()
+        .min(2, "Last name must be at least 2 characters")
+        .regex(/^[a-zA-Z\s]+$/, "Last name must contain only letters")
+        .optional(),
+      email: z.string().email("Invalid email address").optional(),
+      universityId: z
+        .string()
+        .min(1, "University ID is required")
+        .regex(/^\d+$/, "University ID must contain only numbers")
+        .optional(),
+      programId: z.string().uuid().optional(),
+    }),
+  ]),
   params: z.object({
     id: z.string().uuid(),
   })

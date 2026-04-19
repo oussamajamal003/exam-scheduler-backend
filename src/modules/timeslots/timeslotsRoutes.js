@@ -7,8 +7,8 @@ import {
 	getTimeSlotSchema,
 	getTimeSlotsSchema,
 	updateTimeSlotSchema,
-} from './validation.js';
-import * as controller from './controller.js';
+} from './timeslotsValidation.js';
+import * as controller from './timeslotsController.js';
 
 const router = express.Router();
 router.use(authGuard);

@@ -7,8 +7,8 @@ import {
 	getSupervisorSchema,
 	getSupervisorsSchema,
 	updateSupervisorSchema,
-} from './validation.js';
-import * as controller from './controller.js';
+} from './supervisorsValidation.js';
+import * as controller from './supervisorsController.js';
 
 const router = express.Router();
 router.use(authGuard);
