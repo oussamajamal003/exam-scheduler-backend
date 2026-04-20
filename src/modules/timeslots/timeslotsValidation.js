@@ -1,12 +1,17 @@
 import { z } from 'zod';
-
-const uuidParamSchema = z.object({
-  params: z.object({
-    id: z.string().uuid(),
-  }),
-});
+import { uuidParamSchema } from '../../validations/common.js';
 
 export const getTimeSlotSchema = uuidParamSchema;
+
+export const getAvailableTimeSlotsSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    scheduleId: z.string().uuid().optional(),
+    startFrom: z.string().datetime().optional(),
+    endTo: z.string().datetime().optional(),
+  }).catchall(z.any()),
+});
 
 export const createTimeSlotSchema = z.object({
   body: z.object({

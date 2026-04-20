@@ -1,21 +1,33 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
-export const getAll = async (query = {}) => {
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
-  const skip = (page - 1) * limit;
-
+const buildTimeSlotWhere = (query = {}, availableOnly = false) => {
   const where = {};
+
   if (query.startFrom || query.endTo) {
     where.startTime = {
       ...(query.startFrom ? { gte: new Date(query.startFrom) } : {}),
       ...(query.endTo ? { lte: new Date(query.endTo) } : {}),
     };
   }
+
   if (query.scheduleId) {
-    where.assignments = { some: { scheduleId: query.scheduleId } };
+    where.assignments = availableOnly
+      ? { none: { scheduleId: query.scheduleId } }
+      : { some: { scheduleId: query.scheduleId } };
+  } else if (availableOnly) {
+    where.assignments = { none: {} };
   }
+
+  return where;
+};
+
+export const getAll = async (query = {}) => {
+  const page = parseInt(query.page) || 1;
+  const limit = parseInt(query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  const where = buildTimeSlotWhere(query);
 
   const [data, total] = await Promise.all([
     prisma.timeSlot.findMany({
@@ -27,6 +39,27 @@ export const getAll = async (query = {}) => {
     prisma.timeSlot.count({ where })
   ]);
   
+  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+};
+
+export const getAvailable = async (query = {}) => {
+  const page = parseInt(query.page) || 1;
+  const limit = parseInt(query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  const where = buildTimeSlotWhere(query, true);
+
+  const [data, total] = await Promise.all([
+    prisma.timeSlot.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { startTime: 'asc' },
+      include: { _count: { select: { assignments: true } } },
+    }),
+    prisma.timeSlot.count({ where }),
+  ]);
+
   return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 

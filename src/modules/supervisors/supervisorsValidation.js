@@ -1,10 +1,5 @@
 import { z } from 'zod';
-
-const uuidParamSchema = z.object({
-  params: z.object({
-    id: z.string().uuid(),
-  }),
-});
+import { uuidParamSchema } from '../../validations/common.js';
 
 export const getSupervisorSchema = uuidParamSchema;
 

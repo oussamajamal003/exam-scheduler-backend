@@ -18,11 +18,15 @@ app.use(express.urlencoded({ extended: true }));
 
 // Modular Routes
 import authRoutes from './modules/auth/authRoutes.js';
-import studentRoutes from './modules/students/studentRoutes.js';
+import studentRoutes from './modules/students/studentsRoutes.js';
 import schedulingRoutes from './modules/scheduling/schedulingRoutes.js';
 import supervisorRoutes from './modules/supervisors/supervisorsRoutes.js';
 import roomRoutes from './modules/rooms/roomsRoutes.js';
 import courseRoutes from './modules/courses/coursesRoutes.js';
+import programRoutes from './modules/programs/programsRoutes.js';
+import semesterRoutes from './modules/semesters/semestersRoutes.js';
+import courseOfferingRoutes from './modules/courseOfferings/courseOfferingsRoutes.js';
+import centerRoutes from './modules/centers/centersRoutes.js';
 import examRoutes from './modules/exams/examsRoutes.js';
 import timeSlotRoutes from './modules/timeslots/timeslotsRoutes.js';
 import enrollmentRoutes from './modules/enrollments/enrollmentsRoutes.js';
@@ -36,6 +40,10 @@ app.use('/api/scheduling', schedulingRoutes);
 app.use('/api/supervisors', supervisorRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/courses', courseRoutes);
+app.use('/api/programs', programRoutes);
+app.use('/api/semesters', semesterRoutes);
+app.use('/api/course-offerings', courseOfferingRoutes);
+app.use('/api/centers', centerRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/timeslots', timeSlotRoutes);
 app.use('/api/enrollments', enrollmentRoutes);

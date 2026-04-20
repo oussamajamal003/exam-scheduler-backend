@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { uuidParamSchema } from '../../validations/common.js';
 
 export const createStudentSchema = z.object({
   body: z.union([
@@ -65,9 +66,7 @@ export const updateStudentSchema = z.object({
 });
 
 export const getStudentSchema = z.object({
-  params: z.object({
-    id: z.string().uuid(),
-  }),
+  params: uuidParamSchema.shape.params,
 });
 
 export const getStudentsSchema = z.object({

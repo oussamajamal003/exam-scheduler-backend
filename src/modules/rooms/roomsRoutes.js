@@ -11,14 +11,13 @@ import {
 import * as controller from './roomsController.js';
 
 const router = express.Router();
-router.use(authGuard);
 
 router.get('/', validate(getRoomsSchema), controller.getAll);
-router.post('/', roleGuard(['TECH_ADMIN']), validate(createRoomSchema), controller.create);
+router.post('/', authGuard, roleGuard(['TECH_ADMIN']), validate(createRoomSchema), controller.create);
 router.get('/available', controller.getAvailable);
 router.get('/:id', validate(getRoomSchema), controller.getById);
-router.put('/:id', roleGuard(['TECH_ADMIN']), validate(updateRoomSchema), controller.update);
-router.delete('/:id', roleGuard(['TECH_ADMIN']), validate(getRoomSchema), controller.remove);
+router.put('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(updateRoomSchema), controller.update);
+router.delete('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(getRoomSchema), controller.remove);
 
 export default router;
 

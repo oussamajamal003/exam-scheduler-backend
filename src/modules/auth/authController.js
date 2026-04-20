@@ -1,41 +1,27 @@
 import { signupUser, loginUser, fetchAllUsers, removeUser } from './authService.js';
+import { sendResponse } from '../../utils/response.js';
+import { catchAsync } from '../../utils/catchAsync.js';
 
-export const signup = async (req, res, next) => {
-  try {
-    const result = await signupUser(req.body);
-    res.status(201).json(result);
-  } catch (error) {
-    next(error);
-  }
-};
+export const signup = catchAsync(async (req, res) => {
+  const result = await signupUser(req.body);
+  sendResponse(res, 201, 'User created successfully', result);
+});
 
-export const login = async (req, res, next) => {
-  try {
-    const result = await loginUser(req.body);
-    res.status(200).json(result);
-  } catch (error) {
-    next(error);
-  }
-};
+export const login = catchAsync(async (req, res) => {
+  const result = await loginUser(req.body);
+  sendResponse(res, 200, 'Login successful', result);
+});
 
 export const logout = (req, res) => {
-  res.status(200).json({ message: 'Logged out successfully' });
+  sendResponse(res, 200, 'Logged out successfully');
 };
 
-export const getAllUsers = async (req, res, next) => {
-  try {
-    const users = await fetchAllUsers();
-    res.status(200).json(users);
-  } catch (error) {
-    next(error);
-  }
-};
+export const getAllUsers = catchAsync(async (req, res) => {
+  const users = await fetchAllUsers();
+  sendResponse(res, 200, 'Users fetched successfully', users);
+});
 
-export const deleteUser = async (req, res, next) => {
-  try {
-    await removeUser(req.user.id);
-    res.status(204).json({ message: 'User deleted successfully' });
-  } catch (error) {
-    next(error);
-  }
-};
+export const deleteUser = catchAsync(async (req, res) => {
+  await removeUser(req.user.id);
+  sendResponse(res, 200, 'User deleted successfully');
+});

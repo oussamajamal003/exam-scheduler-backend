@@ -11,13 +11,12 @@ import {
 import * as controller from './coursesController.js';
 
 const router = express.Router();
-router.use(authGuard);
 
 router.get('/', validate(getCoursesSchema), controller.getAll);
-router.post('/', roleGuard(['TECH_ADMIN']), validate(createCourseSchema), controller.create);
+router.post('/', authGuard, roleGuard(['TECH_ADMIN']), validate(createCourseSchema), controller.create);
 router.get('/:id', validate(getCourseSchema), controller.getById);
-router.put('/:id', roleGuard(['TECH_ADMIN']), validate(updateCourseSchema), controller.update);
-router.delete('/:id', roleGuard(['TECH_ADMIN']), validate(getCourseSchema), controller.remove);
+router.put('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(updateCourseSchema), controller.update);
+router.delete('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(getCourseSchema), controller.remove);
 
 export default router;
 

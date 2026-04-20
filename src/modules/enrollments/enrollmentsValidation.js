@@ -8,10 +8,33 @@ const uuidParamSchema = z.object({
 
 export const getEnrollmentSchema = uuidParamSchema;
 
+export const getEnrollmentStudentSchema = z.object({
+  params: z.object({
+    studentId: z.string().uuid(),
+  }),
+});
+
+export const getEnrollmentOfferingSchema = z.object({
+  params: z.object({
+    offeringId: z.string().uuid(),
+  }),
+});
+
 export const createEnrollmentSchema = z.object({
   body: z.object({
     studentId: z.string().uuid(),
     courseOfferingId: z.string().uuid(),
+  }),
+});
+
+export const bulkImportEnrollmentsSchema = z.object({
+  body: z.object({
+    enrollments: z.array(
+      z.object({
+        studentId: z.string().uuid(),
+        courseOfferingId: z.string().uuid(),
+      })
+    ).min(1),
   }),
 });
 
@@ -27,7 +50,6 @@ export const getEnrollmentsSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional().default(1),
     limit: z.coerce.number().int().min(1).max(100).optional().default(10),
-    search: z.string().optional(),
     studentId: z.string().uuid().optional(),
     courseOfferingId: z.string().uuid().optional(),
     semesterId: z.string().uuid().optional(),

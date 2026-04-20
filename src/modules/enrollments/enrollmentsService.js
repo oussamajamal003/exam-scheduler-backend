@@ -1,6 +1,11 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const buildEnrollmentInclude = {
+  student: { include: { user: { select: { id: true, name: true, email: true } }, program: true } },
+  courseOffering: { include: { course: true, semester: true } },
+};
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -22,10 +27,7 @@ export const getAll = async (query = {}) => {
       where,
       skip,
       take: limit,
-      include: {
-        student: { include: { user: { select: { id: true, name: true, email: true } }, program: true } },
-        courseOffering: { include: { course: true, semester: true } },
-      },
+      include: buildEnrollmentInclude,
     }),
     prisma.registration.count({ where })
   ]);
@@ -38,20 +40,47 @@ export const getById = async (id) => {
     where: { id },
     include: {
       student: { include: { user: { select: { id: true, name: true, email: true, role: true } }, program: true } },
-      courseOffering: { include: { course: true, semester: true, exams: true } },
+      courseOffering: {
+        include: {
+          course: true,
+          semester: true,
+          exams: true,
+        },
+      },
     },
   });
   if (!data) throw new AppError('Not found', 404);
   return data;
 };
 
+export const getByStudent = async (studentId, query = {}) => {
+  return await getAll({ ...query, studentId });
+};
+
+export const getByOffering = async (offeringId, query = {}) => {
+  return await getAll({ ...query, courseOfferingId: offeringId });
+};
+
 export const create = async (data) => {
   return await prisma.registration.create({
     data,
-    include: {
-      student: { include: { user: { select: { id: true, name: true, email: true } } } },
-      courseOffering: { include: { course: true, semester: true } },
-    },
+    include: buildEnrollmentInclude,
+  });
+};
+
+export const bulkImport = async (items = []) => {
+  return await prisma.$transaction(async (tx) => {
+    const created = [];
+
+    for (const item of items) {
+      const enrollment = await tx.registration.create({
+        data: item,
+        include: buildEnrollmentInclude,
+      });
+      created.push(enrollment);
+    }
+
+    return created;
   });
 };
 
@@ -59,10 +88,7 @@ export const update = async (id, data) => {
   return await prisma.registration.update({
     where: { id },
     data,
-    include: {
-      student: { include: { user: { select: { id: true, name: true, email: true } } } },
-      courseOffering: { include: { course: true, semester: true } },
-    },
+    include: buildEnrollmentInclude,
   });
 };
 
