@@ -1,6 +1,6 @@
 import express from 'express';
 import { validate } from '../../middlewares/validate.js';
-import { authGuard } from '../../guards/authguard.js';
+import { authenticate } from '../../middlewares/authMiddleware.js';
 import { roleGuard } from '../../guards/roleGuard.js';
 import {
   createStudentSchema,
@@ -13,7 +13,7 @@ import * as controller from './studentsController.js';
 const router = express.Router();
 
 // Middleware applied to all routes in this file
-router.use(authGuard);
+router.use(authenticate);
 
 router.get('/', roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN']), validate(getStudentsSchema), controller.getAllStudents);
 router.post('/', roleGuard(['TECH_ADMIN']), validate(createStudentSchema), controller.createStudent);

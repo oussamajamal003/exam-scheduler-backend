@@ -1,5 +1,5 @@
 import express from 'express';
-import { authGuard } from '../../guards/authguard.js';
+import { authenticate } from '../../middlewares/authMiddleware.js';
 import { roleGuard } from '../../guards/roleGuard.js';
 import { validate } from '../../middlewares/validate.js';
 import {
@@ -13,9 +13,9 @@ import * as controller from './semestersController.js';
 const router = express.Router();
 
 router.get('/', validate(getSemestersSchema), controller.getAll);
-router.post('/', authGuard, roleGuard(['TECH_ADMIN']), validate(createSemesterSchema), controller.create);
+router.post('/', authenticate, roleGuard(['TECH_ADMIN']), validate(createSemesterSchema), controller.create);
 router.get('/:id', validate(getSemesterSchema), controller.getById);
-router.put('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(updateSemesterSchema), controller.update);
-router.delete('/:id', authGuard, roleGuard(['TECH_ADMIN']), validate(getSemesterSchema), controller.remove);
+router.put('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(updateSemesterSchema), controller.update);
+router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(getSemesterSchema), controller.remove);
 
 export default router;

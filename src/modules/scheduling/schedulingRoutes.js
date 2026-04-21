@@ -1,6 +1,6 @@
 import express from 'express';
 import { validate } from '../../middlewares/validate.js';
-import { authGuard } from '../../guards/authguard.js';
+import { authenticate } from '../../middlewares/authMiddleware.js';
 import { roleGuard } from '../../guards/roleGuard.js'; 
 import {
   prepareSchedulingSchema,
@@ -19,7 +19,7 @@ import {
 
 const router = express.Router();
 
-router.use(authGuard);
+router.use(authenticate);
 // Restrict to admins running algorithms
 router.use(roleGuard(['SCHEDULING_ADMIN', 'TECH_ADMIN']));
 

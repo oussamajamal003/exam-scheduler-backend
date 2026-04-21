@@ -1,3 +1,4 @@
+import logger from '../utils/logger.js';
 import pkg from 'pg';
 import { config } from './env.js';
 
@@ -11,10 +12,10 @@ const pool = new Pool({
 export const connectDB = async () => {
   try {
     const client = await pool.connect();
-    console.log('Database connected successfully');
+    logger.info('Database connected successfully');
     client.release();
   } catch (error) {
-    console.error('Database connection error:', error.message);
+    logger.error('Database connection error:', error.message);
     process.exit(1);
   }
 };

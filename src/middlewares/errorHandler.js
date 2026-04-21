@@ -1,4 +1,5 @@
 import { sendResponse } from '../utils/response.js';
+import logger from '../utils/logger.js';
 
 export const errorHandler = (err, req, res, next) => {
   const statusCode = err.statusCode || 500;
@@ -6,6 +7,7 @@ export const errorHandler = (err, req, res, next) => {
 
   // Handle Zod Validation Errors gracefully
   if (err.name === 'ZodError') {
+    logger.warn(`Zod Validation Error: ${JSON.stringify(err.errors)}`, req);
     return res.status(400).json({
       success: false,
       message: 'Validation Error',
@@ -15,7 +17,7 @@ export const errorHandler = (err, req, res, next) => {
 
   // Log error for internal tracking (skip verbose logging in testing)
   if (process.env.NODE_ENV !== 'test') {
-    console.error(`[Error] ${statusCode} - ${message}\n${err.stack}`);
+    logger.error(`[Error] ${statusCode} - ${message}`, err.stack, req);
   }
 
   res.status(statusCode).json({

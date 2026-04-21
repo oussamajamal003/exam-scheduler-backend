@@ -1,4 +1,5 @@
 import { verifyToken } from '../utils/jwt.js';
+import { auditContext } from './auditContext.js';
 
 export const authenticate = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -12,11 +13,15 @@ export const authenticate = (req, res, next) => {
   try {
     const decoded = verifyToken(token);
     req.user = decoded;
-    next();
+    
+    auditContext.run({ userId: decoded.id }, () => {
+      next();
+    });
   } catch (error) {
     res.status(403).json({ success: false, error: 'Invalid or expired token.' });
   }
 };
+
 
 export const restrictTo = (...roles) => {
   return (req, res, next) => {

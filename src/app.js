@@ -4,6 +4,7 @@ import swaggerUi from 'swagger-ui-express';
 import YAML from 'yamljs';
 import { fileURLToPath } from 'url';
 import { errorHandler } from './middlewares/errorHandler.js';
+import { requestLogger } from './middlewares/requestLogger.js';
 
 const swaggerDocument = YAML.load(
     fileURLToPath(new URL('./docs/openapi.yaml', import.meta.url))
@@ -15,6 +16,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Setup Request Logger
+app.use(requestLogger);
 
 // Modular Routes
 import authRoutes from './modules/auth/authRoutes.js';

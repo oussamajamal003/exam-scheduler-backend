@@ -43,18 +43,24 @@ enum OfferingStatus {
   CANCELLED
 }
 
+enum SemesterStatus {
+  ACTIVE
+  UPCOMING
+  PAST
+}
+
 // -----------------------------------
 // USER SYSTEM
 // -----------------------------------
 model User {
-  id         String      @id @default(uuid())
-  name       String
-  email      String      @unique
-  password   String
-  role       Role        @default(STUDENT)
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
-  
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(STUDENT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   student    Student?
   supervisor Supervisor?
 
@@ -62,68 +68,106 @@ model User {
 }
 
 model Student {
-  id           String       @id @default(uuid())
-  userId       String       @unique
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   programId    String?
-  program      Program?     @relation(fields: [programId], references: [id], onDelete: SetNull)
-  universityId String       @unique
-  
+  program      Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
+  universityId String   @unique
+
   registrations Registration[]
 
   @@map("students")
+  createdBy   String?
+  updatedBy   String?
 }
 
 model Supervisor {
-  id              String           @id @default(uuid())
-  userId          String           @unique
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  centerId        String
-  center          Center           @relation(fields: [centerId], references: [id], onDelete: Restrict)
-  department      String?
-  maxExamsPerDay  Int?             @default(2)
-  
+  id             String  @id @default(uuid())
+  userId         String  @unique
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  centerId       String
+  center         Center  @relation(fields: [centerId], references: [id], onDelete: Restrict)
+  department     String?
+  maxExamsPerDay Int?    @default(2)
+
   assignments ExamAssignment[]
 
   @@map("supervisors")
+  createdBy   String?
+  updatedBy   String?
 }
 
 // -----------------------------------
 // MINI SIS (ACADEMIC DATA)
 // -----------------------------------
 model Program {
+  id   String @id @default(uuid())
+  name String
+  code String @unique
+  description  String?
+  isActive     Boolean     @default(true)
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  
+  students Student[]
+  courses  Course[]
+
+  @@map("programs")
+  createdBy   String?
+  updatedBy   String?
+}
+
+model Department {
   id        String    @id @default(uuid())
   name      String
   code      String    @unique
-  
-  students  Student[]
-  courses   Course[]
+  createdAt DateTime  @default(now())
 
-  @@map("programs")
+  programs  Program[]
+
+  @@map("departments")
 }
 
+
 model Semester {
-  id              String           @id @default(uuid())
-  name            String           // e.g., "Fall 2026"
-  startDate       DateTime
-  endDate         DateTime
-  isActive        Boolean          @default(false)
-  
+  id        String   @id @default(uuid())
+  name      String // e.g., "Fall 2026"
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(false)
+  isCurrent    Boolean        @default(false)
+  academicYear String?
+  status       SemesterStatus @default(UPCOMING)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
   courseOfferings CourseOffering[]
 
   @@map("semesters")
+  createdBy   String?
+  updatedBy   String?
 }
 
 model Course {
-  id              String           @id @default(uuid())
-  code            String           @unique
-  title           String
-  programId       String?
-  program         Program?         @relation(fields: [programId], references: [id], onDelete: SetNull)
-  
+  id        String   @id @default(uuid())
+  code      String   @unique
+  title     String
+  programId String?
+  program   Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
+  credits      Int?
+  description  String?
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
   courseOfferings CourseOffering[]
 
   @@map("courses")
+  createdBy   String?
+  updatedBy   String?
 }
 
 model CourseOffering {
@@ -133,13 +177,20 @@ model CourseOffering {
   semesterId       String
   semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
   section          String?
+  instructor   String?
   expectedStudents Int            @default(0)
   capacity         Int?
+  day          String?
+  time         String?
+  roomLabel    String?
+  notes        String?
   status           OfferingStatus @default(ACTIVE)
   createdBy        String?
-  
-  registrations    Registration[]
-  exams            Exam[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  registrations Registration[]
+  exams         Exam[]
 
   // A specific course section should only occur once per semester
   @@unique([courseId, semesterId, section])
@@ -154,6 +205,10 @@ model Registration {
   student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade)
   courseOfferingId String
   courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
+  status       String?        @default("ACTIVE")
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
 
   // Prevent duplicate enrollment for the exact same offering
   @@unique([studentId, courseOfferingId])
@@ -166,54 +221,70 @@ model Registration {
 // RESOURCES
 // -----------------------------------
 model Center {
-  id          String       @id @default(uuid())
-  name        String       @unique
-  location    String?
-  
+  id       String  @id @default(uuid())
+  name     String  @unique
+  location String?
+  code         String?        @unique
+  description  String?
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+
   rooms       Room[]
   supervisors Supervisor[]
 
   @@map("centers")
+  createdBy   String?
+  updatedBy   String?
 }
 
 model Room {
-  id          String           @id @default(uuid())
-  centerId    String
-  center      Center           @relation(fields: [centerId], references: [id], onDelete: Cascade)
-  name        String
-  capacity    Int
-  status      RoomStatus       @default(AVAILABLE)
-  
+  id       String     @id @default(uuid())
+  centerId String
+  center   Center     @relation(fields: [centerId], references: [id], onDelete: Cascade)
+  name     String
+  capacity Int
+  status   RoomStatus @default(AVAILABLE)
+
   assignments ExamAssignment[]
 
   // Room names must be unique within a center
   @@unique([centerId, name])
   @@map("rooms")
+  createdBy   String?
+  updatedBy   String?
 }
 
 model TimeSlot {
-  id          String           @id @default(uuid())
-  startTime   DateTime
-  endTime     DateTime
-  
+  id        String   @id @default(uuid())
+  startTime DateTime
+  endTime   DateTime
+  date         DateTime?
+  duration     Int?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
   assignments ExamAssignment[]
 
   @@unique([startTime, endTime])
   @@map("time_slots")
+  createdBy   String?
+  updatedBy   String?
 }
 
 // -----------------------------------
 // EXAMS
 // -----------------------------------
 model Exam {
-  id               String           @id @default(uuid())
+  id               String         @id @default(uuid())
   courseOfferingId String
-  courseOffering   CourseOffering   @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
-  status           ExamStatus       @default(DRAFT)
-  duration         Int?             // Duration in minutes
+  courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
+  status           ExamStatus     @default(DRAFT)
+  duration         Int? // Duration in minutes
   createdBy        String?
-  
-  assignments      ExamAssignment[]
+
+  assignments ExamAssignment[]
 
   @@index([courseOfferingId])
   @@map("exams")
@@ -223,13 +294,13 @@ model Exam {
 // SCHEDULING CORE
 // -----------------------------------
 model Schedule {
-  id          String           @id @default(uuid())
-  name        String
-  isFinal     Boolean          @default(false)
-  createdBy   String?
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  
+  id        String   @id @default(uuid())
+  name      String
+  isFinal   Boolean  @default(false)
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   assignments ExamAssignment[]
   conflicts   Conflict[]
 
@@ -237,21 +308,21 @@ model Schedule {
 }
 
 model ExamAssignment {
-  id           String     @id @default(uuid())
-  scheduleId   String
-  schedule     Schedule   @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
-  
-  examId       String
-  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
-  
-  roomId       String
-  room         Room       @relation(fields: [roomId], references: [id], onDelete: Restrict)
-  
+  id         String   @id @default(uuid())
+  scheduleId String
+  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  examId String
+  exam   Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  roomId String
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Restrict)
+
   supervisorId String
   supervisor   Supervisor @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
-  
-  timeSlotId   String
-  timeSlot     TimeSlot   @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
+
+  timeSlotId String
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
 
   // Prevents algorithm from generating duplicate identical assignments for the same schedule
   @@unique([scheduleId, examId, roomId, supervisorId, timeSlotId])
@@ -267,10 +338,10 @@ model ExamAssignment {
 // CONFLICT SYSTEM
 // -----------------------------------
 model Conflict {
-  id          String       @id @default(uuid())
-  scheduleId  String
-  schedule    Schedule     @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
-  
+  id         String   @id @default(uuid())
+  scheduleId String
+  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
   type        ConflictType
   description String
   resolved    Boolean      @default(false)
@@ -278,13 +349,26 @@ model Conflict {
 
   @@index([scheduleId])
   @@map("conflicts")
+  createdBy   String?
+  updatedBy   String?
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  action      String
+  entity      String
+  entityId    String
+  oldData     Json?
+  newData     Json?
+  createdAt   DateTime @default(now())
 }
 
 
 
-
 // Mini SIS → (Students, Courses, Enrollments)
-//       ↓
+//         ↓
 // Scheduling → (Exams, TimeSlots, Rooms, Supervisors)
 //         ↓
 // Execution → (Schedule, Assignments, Conflicts)
+

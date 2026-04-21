@@ -1,5 +1,5 @@
 import express from 'express';
-import { authGuard } from '../../guards/authguard.js';
+import { authenticate } from '../../middlewares/authMiddleware.js';
 import { roleGuard } from '../../guards/roleGuard.js';
 import { validate } from '../../middlewares/validate.js';
 import {
@@ -11,7 +11,7 @@ import {
 import * as controller from './supervisorsController.js';
 
 const router = express.Router();
-router.use(authGuard);
+router.use(authenticate);
 
 router.get('/', validate(getSupervisorsSchema), controller.getAll);
 router.post('/', roleGuard(['TECH_ADMIN']), validate(createSupervisorSchema), controller.create);

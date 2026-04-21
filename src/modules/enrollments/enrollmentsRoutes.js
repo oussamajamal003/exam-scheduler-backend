@@ -1,5 +1,5 @@
 import express from 'express';
-import { authGuard } from '../../guards/authguard.js';
+import { authenticate } from '../../middlewares/authMiddleware.js';
 import { roleGuard } from '../../guards/roleGuard.js';
 import { validate } from '../../middlewares/validate.js';
 import {
@@ -14,7 +14,7 @@ import {
 import * as controller from './enrollmentsController.js';
 
 const router = express.Router();
-router.use(authGuard);
+router.use(authenticate);
 
 router.get('/', roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN', 'SUPERVISOR', 'STUDENT']), validate(getEnrollmentsSchema), controller.getAll);
 router.get('/student/:studentId', roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN', 'SUPERVISOR', 'STUDENT']), validate(getEnrollmentStudentSchema), controller.getByStudent);
