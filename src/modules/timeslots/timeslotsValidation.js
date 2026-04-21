@@ -17,6 +17,8 @@ export const createTimeSlotSchema = z.object({
   body: z.object({
     startTime: z.string().datetime(),
     endTime: z.string().datetime(),
+    date: z.string().datetime().optional(),
+    duration: z.number().int().min(0).optional(),
   }),
 });
 
@@ -25,6 +27,8 @@ export const updateTimeSlotSchema = z.object({
   body: z.object({
     startTime: z.string().datetime().optional(),
     endTime: z.string().datetime().optional(),
+    date: z.string().datetime().optional(),
+    duration: z.number().int().min(0).optional(),
   }),
 });
 

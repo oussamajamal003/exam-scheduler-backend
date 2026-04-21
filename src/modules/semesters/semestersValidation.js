@@ -9,6 +9,9 @@ export const createSemesterSchema = z.object({
     startDate: z.string().datetime(),
     endDate: z.string().datetime(),
     isActive: z.boolean().optional(),
+    isCurrent: z.boolean().optional(),
+    academicYear: z.string().optional(),
+    status: z.enum(['ACTIVE', 'UPCOMING', 'PAST']).optional().default('UPCOMING'),
   }),
 });
 
@@ -19,6 +22,9 @@ export const updateSemesterSchema = z.object({
     startDate: z.string().datetime().optional(),
     endDate: z.string().datetime().optional(),
     isActive: z.boolean().optional(),
+    isCurrent: z.boolean().optional(),
+    academicYear: z.string().optional(),
+    status: z.enum(['ACTIVE', 'UPCOMING', 'PAST']).optional(),
   }),
 });
 

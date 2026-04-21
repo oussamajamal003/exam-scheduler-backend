@@ -8,6 +8,9 @@ export const createCourseSchema = z.object({
     code: z.string().min(1),
     title: z.string().min(1),
     programId: z.string().uuid().optional(),
+    credits: z.number().int().min(0).optional(),
+    description: z.string().optional(),
+    isActive: z.boolean().optional().default(true),
   }),
 });
 
@@ -17,6 +20,9 @@ export const updateCourseSchema = z.object({
     code: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
     programId: z.string().uuid().optional(),
+    credits: z.number().int().min(0).optional(),
+    description: z.string().optional(),
+    isActive: z.boolean().optional(),
   }),
 });
 

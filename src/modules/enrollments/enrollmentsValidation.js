@@ -24,6 +24,7 @@ export const createEnrollmentSchema = z.object({
   body: z.object({
     studentId: z.string().uuid(),
     courseOfferingId: z.string().uuid(),
+    status: z.string().optional().default('ACTIVE'),
   }),
 });
 
@@ -33,6 +34,7 @@ export const bulkImportEnrollmentsSchema = z.object({
       z.object({
         studentId: z.string().uuid(),
         courseOfferingId: z.string().uuid(),
+        status: z.string().optional().default('ACTIVE'),
       })
     ).min(1),
   }),
@@ -43,6 +45,7 @@ export const updateEnrollmentSchema = z.object({
   body: z.object({
     studentId: z.string().uuid().optional(),
     courseOfferingId: z.string().uuid().optional(),
+    status: z.string().optional(),
   }),
 });
 

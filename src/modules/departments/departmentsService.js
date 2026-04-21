@@ -19,66 +19,57 @@ export const getAll = async (query = {}) => {
   }
 
   const [data, total] = await Promise.all([
-    prisma.program.findMany({
+    prisma.department.findMany({
       where,
       skip,
       take: limit,
       orderBy: { name: 'asc' },
       include: {
-        department: true,
-        _count: { select: { students: true, courses: true } },
+        _count: { select: { programs: true } },
       },
     }),
-    prisma.program.count({ where }),
+    prisma.department.count({ where }),
   ]);
 
   return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
-  const data = await prisma.program.findUnique({
+  const data = await prisma.department.findUnique({
     where: { id },
     include: {
-      department: true,
-      _count: { select: { students: true, courses: true } },
-      students: {
+      programs: {
         include: {
-          user: { select: { id: true, name: true, email: true, role: true } },
+          _count: { select: { students: true, courses: true } },
         },
       },
-      courses: {
-        include: {
-          _count: { select: { courseOfferings: true } },
-        },
-      },
+      _count: { select: { programs: true } },
     },
   });
 
-  if (!data) throw new AppError('Program not found', 404);
+  if (!data) throw new AppError('Department not found', 404);
   return data;
 };
 
 export const create = async (data) => {
-  return await prisma.program.create({
+  return await prisma.department.create({
     data,
     include: {
-      department: true,
-      _count: { select: { students: true, courses: true } },
+      _count: { select: { programs: true } },
     },
   });
 };
 
 export const update = async (id, data) => {
-  return await prisma.program.update({
+  return await prisma.department.update({
     where: { id },
     data,
     include: {
-      department: true,
-      _count: { select: { students: true, courses: true } },
+      _count: { select: { programs: true } },
     },
   });
 };
 
 export const remove = async (id) => {
-  return await prisma.program.delete({ where: { id } });
+  return await prisma.department.delete({ where: { id } });
 };

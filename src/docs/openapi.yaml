@@ -74,40 +74,38 @@ components:
         password:
           type: string
           format: password
-    Course:
+    Department:
       type: object
       properties:
         id:
           type: string
           format: uuid
+        name:
+          type: string
         code:
           type: string
-        title:
+        createdAt:
           type: string
-        programId:
-          type: string
-          format: uuid
-    CourseCreate:
+          format: date-time
+    DepartmentCreate:
       type: object
-      required: [code, title]
+      required: [name, code]
       properties:
+        name:
+          type: string
+          example: Computer Science
         code:
           type: string
-        title:
-          type: string
-        programId:
-          type: string
-          format: uuid
-    CourseUpdate:
+          example: CS
+    DepartmentUpdate:
       type: object
       properties:
+        name:
+          type: string
+          example: Computer Science
         code:
           type: string
-        title:
-          type: string
-        programId:
-          type: string
-          format: uuid
+          example: CS
     Program:
       type: object
       properties:
@@ -118,14 +116,40 @@ components:
           type: string
         code:
           type: string
+        description:
+          type: string
+          nullable: true
+        departmentId:
+          type: string
+          format: uuid
+          nullable: true
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     ProgramCreate:
       type: object
       required: [name, code]
       properties:
         name:
           type: string
+          example: Bachelor of Science in Computer Science
         code:
           type: string
+          example: BSCS
+        description:
+          type: string
+          example: Four year program in Computer Science
+        departmentId:
+          type: string
+          format: uuid
+        isActive:
+          type: boolean
+          default: true
     ProgramUpdate:
       type: object
       properties:
@@ -133,6 +157,13 @@ components:
           type: string
         code:
           type: string
+        description:
+          type: string
+        departmentId:
+          type: string
+          format: uuid
+        isActive:
+          type: boolean
     Semester:
       type: object
       properties:
@@ -149,20 +180,48 @@ components:
           format: date-time
         isActive:
           type: boolean
+        isCurrent:
+          type: boolean
+        academicYear:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [ACTIVE, UPCOMING, PAST]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     SemesterCreate:
       type: object
       required: [name, startDate, endDate]
       properties:
         name:
           type: string
+          example: Fall 2026
         startDate:
           type: string
           format: date-time
+          example: '2026-09-01T00:00:00Z'
         endDate:
           type: string
           format: date-time
+          example: '2026-12-31T23:59:59Z'
         isActive:
           type: boolean
+          default: false
+        isCurrent:
+          type: boolean
+          default: false
+        academicYear:
+          type: string
+          example: '2026'
+        status:
+          type: string
+          enum: [ACTIVE, UPCOMING, PAST]
+          default: UPCOMING
     SemesterUpdate:
       type: object
       properties:
@@ -174,6 +233,79 @@ components:
         endDate:
           type: string
           format: date-time
+        isActive:
+          type: boolean
+        isCurrent:
+          type: boolean
+        academicYear:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, UPCOMING, PAST]
+    Course:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        title:
+          type: string
+        programId:
+          type: string
+          format: uuid
+          nullable: true
+        credits:
+          type: integer
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CourseCreate:
+      type: object
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          example: CS101
+        title:
+          type: string
+          example: Introduction to Computer Science
+        programId:
+          type: string
+          format: uuid
+        credits:
+          type: integer
+          example: 3
+        description:
+          type: string
+          example: Fundamental concepts of computer science
+        isActive:
+          type: boolean
+          default: true
+    CourseUpdate:
+      type: object
+      properties:
+        code:
+          type: string
+        title:
+          type: string
+        programId:
+          type: string
+          format: uuid
+        credits:
+          type: integer
+        description:
+          type: string
         isActive:
           type: boolean
     CourseOffering:
@@ -191,36 +323,75 @@ components:
         section:
           type: string
           nullable: true
+        instructor:
+          type: string
+          nullable: true
         expectedStudents:
           type: integer
         capacity:
           type: integer
           nullable: true
+        day:
+          type: string
+          nullable: true
+        time:
+          type: string
+          nullable: true
+        roomLabel:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
         status:
           type: string
           enum: [ACTIVE, INACTIVE, CANCELLED]
-        createdBy:
+        createdAt:
           type: string
-          nullable: true
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     CourseOfferingCreate:
       type: object
-      required: [courseId, semesterId, expectedStudents]
+      required: [courseId, semesterId]
       properties:
         courseId:
           type: string
           format: uuid
+          example: '123e4567-e89b-12d3-a456-426614174000'
         semesterId:
           type: string
           format: uuid
+          example: '223e4567-e89b-12d3-a456-426614174001'
         section:
           type: string
+          example: A
+        instructor:
+          type: string
+          example: Dr. John Smith
         expectedStudents:
           type: integer
+          example: 30
         capacity:
           type: integer
+          example: 35
+        day:
+          type: string
+          example: Monday
+        time:
+          type: string
+          example: '09:00-10:30'
+        roomLabel:
+          type: string
+          example: Room 101
+        notes:
+          type: string
+          example: Lab session included
         status:
           type: string
           enum: [ACTIVE, INACTIVE, CANCELLED]
+          default: ACTIVE
     CourseOfferingUpdate:
       type: object
       properties:
@@ -232,73 +403,23 @@ components:
           format: uuid
         section:
           type: string
+        instructor:
+          type: string
         expectedStudents:
           type: integer
         capacity:
           type: integer
+        day:
+          type: string
+        time:
+          type: string
+        roomLabel:
+          type: string
+        notes:
+          type: string
         status:
           type: string
           enum: [ACTIVE, INACTIVE, CANCELLED]
-    Center:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        location:
-          type: string
-          nullable: true
-    CenterCreate:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-        location:
-          type: string
-    CenterUpdate:
-      type: object
-      properties:
-        name:
-          type: string
-        location:
-          type: string
-    Room:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        centerId:
-          type: string
-          format: uuid
-        name:
-          type: string
-        capacity:
-          type: integer
-    RoomCreate:
-      type: object
-      required: [centerId, name, capacity]
-      properties:
-        centerId:
-          type: string
-          format: uuid
-        name:
-          type: string
-        capacity:
-          type: integer
-    RoomUpdate:
-      type: object
-      properties:
-        centerId:
-          type: string
-          format: uuid
-        name:
-          type: string
-        capacity:
-          type: integer
     TimeSlot:
       type: object
       properties:
@@ -311,6 +432,19 @@ components:
         endTime:
           type: string
           format: date-time
+        date:
+          type: string
+          format: date-time
+          nullable: true
+        duration:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     TimeSlotCreate:
       type: object
       required: [startTime, endTime]
@@ -318,9 +452,17 @@ components:
         startTime:
           type: string
           format: date-time
+          example: '2026-09-15T09:00:00Z'
         endTime:
           type: string
           format: date-time
+          example: '2026-09-15T10:30:00Z'
+        date:
+          type: string
+          format: date-time
+        duration:
+          type: integer
+          example: 90
     TimeSlotUpdate:
       type: object
       properties:
@@ -330,7 +472,12 @@ components:
         endTime:
           type: string
           format: date-time
-    Enrollment:
+        date:
+          type: string
+          format: date-time
+        duration:
+          type: integer
+    Registration:
       type: object
       properties:
         id:
@@ -342,9 +489,32 @@ components:
         courseOfferingId:
           type: string
           format: uuid
-    EnrollmentCreate:
+        status:
+          type: string
+          example: ACTIVE
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RegistrationCreate:
       type: object
       required: [studentId, courseOfferingId]
+      properties:
+        studentId:
+          type: string
+          format: uuid
+          example: '123e4567-e89b-12d3-a456-426614174005'
+        courseOfferingId:
+          type: string
+          format: uuid
+          example: '223e4567-e89b-12d3-a456-426614174006'
+        status:
+          type: string
+          default: ACTIVE
+    RegistrationUpdate:
+      type: object
       properties:
         studentId:
           type: string
@@ -352,7 +522,9 @@ components:
         courseOfferingId:
           type: string
           format: uuid
-    EnrollmentBulkImport:
+        status:
+          type: string
+    RegistrationBulkImport:
       type: object
       required: [enrollments]
       properties:
@@ -368,20 +540,10 @@ components:
               courseOfferingId:
                 type: string
                 format: uuid
-    Exam:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        courseOfferingId:
-          type: string
-          format: uuid
-        status:
-          type: string
-        duration:
-          type: integer
-    Student:
+              status:
+                type: string
+                default: ACTIVE
+    Center:
       type: object
       properties:
         id:
@@ -389,108 +551,105 @@ components:
           format: uuid
         name:
           type: string
-        email:
+        location:
           type: string
-          format: email
-        programId:
+          nullable: true
+        code:
           type: string
-          format: uuid
-    StudentCreate:
-      type: object
-      required: [name, email, programId]
-      properties:
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-        programId:
-          type: string
-          format: uuid
-    StudentUpdate:
-      type: object
-      properties:
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-        programId:
-          type: string
-          format: uuid
-    Supervisor:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-    SupervisorCreate:
-      type: object
-      required: [name, email]
-      properties:
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-    SupervisorUpdate:
-      type: object
-      properties:
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-    ConflictDetectionRequest:
-      type: object
-      required: [scheduleId, type]
-      properties:
-        scheduleId:
-          type: string
-          format: uuid
-        type:
-          type: string
-          enum: [STUDENT_OVERLAP, SUPERVISOR_DOUBLE_BOOKED, ROOM_OVERCAPACITY, RESOURCE_UNAVAILABLE, TIME_CONSTRAINT_VIOLATION]
+          nullable: true
         description:
           type: string
-        resolved:
+          nullable: true
+        isActive:
           type: boolean
-    SchedulePrepareRequest:
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CenterCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: Main Campus
+        location:
+          type: string
+          example: Downtown
+        code:
+          type: string
+          example: MC
+        description:
+          type: string
+          example: Primary examination center
+        isActive:
+          type: boolean
+          default: true
+    CenterUpdate:
       type: object
       properties:
-        semesterId:
+        name:
+          type: string
+        location:
+          type: string
+        code:
+          type: string
+        description:
+          type: string
+        isActive:
+          type: boolean
+    Room:
+      type: object
+      properties:
+        id:
           type: string
           format: uuid
-        constraints:
-          type: object
-    ScheduleValidateInputRequest:
-      type: object
-      properties:
-        scheduleId:
+        centerId:
           type: string
           format: uuid
-    ScheduleGenerateRequest:
-      type: object
-      required: [semesterId]
-      properties:
-        semesterId:
+        name:
           type: string
-          format: uuid
-    ScheduleAnalysis:
-      type: object
-      properties:
-        totalConflicts:
+        capacity:
           type: integer
-        roomUtilization:
-          type: number
-        supervisorLoadStdDev:
-          type: number
-      additionalProperties: true
+        status:
+          type: string
+          enum: [AVAILABLE, MAINTENANCE]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RoomCreate:
+      type: object
+      required: [centerId, name, capacity]
+      properties:
+        centerId:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174002
+        name:
+          type: string
+          example: A-101
+        capacity:
+          type: integer
+          example: 50
+        status:
+          type: string
+          enum: [AVAILABLE, MAINTENANCE]
+          default: AVAILABLE
+    RoomUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        capacity:
+          type: integer
+        status:
+          type: string
+          enum: [AVAILABLE, MAINTENANCE]
 tags:
   - name: AI
     description: Schedule evaluation and AI utilities.
@@ -500,6 +659,8 @@ tags:
     description: Conflict detection endpoints.
   - name: Courses
     description: Course management.
+  - name: Departments
+    description: Department management.
   - name: Programs
     description: Program management.
   - name: Semesters
@@ -637,32 +798,60 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /programs:
+  /courses:
     get:
-      tags: [Programs]
-      summary: Get all programs
+      tags: [Courses]
+      summary: Get all courses
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Search by code or title
+        - in: query
+          name: programId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by program ID
       responses:
         '200':
-          description: Programs list
+          description: Courses list
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
     post:
-      tags: [Programs]
-      summary: Create a program
+      tags: [Courses]
+      summary: Create a course
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProgramCreate'
+              $ref: '#/components/schemas/CourseCreate'
             example:
-              name: Computer Science
-              code: CS
+              code: CS101
+              title: Introduction to Computer Science
+              programId: 123e4567-e89b-12d3-a456-426614174003
+              credits: 3
+              description: Fundamental concepts of computer science
+              isActive: true
       responses:
         '201':
-          description: Program created
+          description: Course created successfully
           content:
             application/json:
               schema:
@@ -680,7 +869,321 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /courses/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Course ID
+    get:
+      tags: [Courses]
+      summary: Get course by ID
+      responses:
+        '200':
+          description: Course fetched successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          description: Course not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags: [Courses]
+      summary: Update a course
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CourseUpdate'
+            example:
+              title: Introduction to Computer Science (Updated)
+              credits: 4
+              isActive: true
+      responses:
+        '200':
+          description: Course updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Course not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags: [Courses]
+      summary: Delete a course
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Course deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Course not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /departments:
+    get:
+      tags: [Departments]
+      summary: Get all departments
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Search by name or code
+      responses:
+        '200':
+          description: Departments list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+    post:
+      tags: [Departments]
+      summary: Create a department
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepartmentCreate'
+            example:
+              name: Computer Science
+              code: CS
+      responses:
+        '201':
+          description: Department created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /departments/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Departments]
+      summary: Get department by ID
+      responses:
+        '200':
+          description: Department details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          description: Department not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags: [Departments]
+      summary: Update department
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepartmentUpdate'
+      responses:
+        '200':
+          description: Department updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          description: Department not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags: [Departments]
+      summary: Delete department
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Department deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          description: Department not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /programs:
+    get:
+      tags: [Programs]
+      summary: Get all programs
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Search by name or code
+      responses:
+        '200':
+          description: Programs list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+    post:
+      tags: [Programs]
+      summary: Create a program
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgramCreate'
+            example:
+              name: Bachelor of Science in Computer Science
+              code: BSCS
+              description: Four year program in Computer Science
+              departmentId: 123e4567-e89b-12d3-a456-426614174003
+              isActive: true
+      responses:
+        '201':
+          description: Program created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -693,6 +1196,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Program ID
     get:
       tags: [Programs]
       summary: Get program by ID
@@ -712,6 +1216,8 @@ paths:
     put:
       tags: [Programs]
       summary: Update a program
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -719,8 +1225,9 @@ paths:
             schema:
               $ref: '#/components/schemas/ProgramUpdate'
             example:
-              name: Computer Science Updated
-              code: CS
+              name: Bachelor of Science in Computer Science (Updated)
+              code: BSCS
+              isActive: true
       responses:
         '200':
           description: Program updated successfully
@@ -741,7 +1248,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -755,6 +1262,8 @@ paths:
     delete:
       tags: [Programs]
       summary: Delete a program
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Program deleted successfully
@@ -769,7 +1278,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -784,6 +1293,27 @@ paths:
     get:
       tags: [Semesters]
       summary: Get all semesters
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Search by name
+        - in: query
+          name: isActive
+          schema:
+            type: boolean
+          description: Filter by active status
       responses:
         '200':
           description: Semesters list
@@ -794,6 +1324,8 @@ paths:
     post:
       tags: [Semesters]
       summary: Create a semester
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -801,10 +1333,13 @@ paths:
             schema:
               $ref: '#/components/schemas/SemesterCreate'
             example:
-              name: Fall 2024
-              startDate: '2024-09-01T00:00:00Z'
-              endDate: '2024-12-31T23:59:59Z'
+              name: Fall 2026
+              startDate: '2026-09-01T00:00:00Z'
+              endDate: '2026-12-31T23:59:59Z'
               isActive: false
+              isCurrent: false
+              academicYear: '2026'
+              status: UPCOMING
       responses:
         '201':
           description: Semester created successfully
@@ -825,7 +1360,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -838,6 +1373,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Semester ID
     get:
       tags: [Semesters]
       summary: Get semester by ID
@@ -857,6 +1393,8 @@ paths:
     put:
       tags: [Semesters]
       summary: Update a semester
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -864,10 +1402,11 @@ paths:
             schema:
               $ref: '#/components/schemas/SemesterUpdate'
             example:
-              name: Fall 2024 Updated
-              startDate: '2024-09-01T00:00:00Z'
-              endDate: '2024-12-31T23:59:59Z'
+              name: Fall 2026 (Updated)
+              startDate: '2026-09-01T00:00:00Z'
+              endDate: '2026-12-31T23:59:59Z'
               isActive: true
+              status: ACTIVE
       responses:
         '200':
           description: Semester updated successfully
@@ -888,7 +1427,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -902,6 +1441,8 @@ paths:
     delete:
       tags: [Semesters]
       summary: Delete a semester
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Semester deleted successfully
@@ -916,7 +1457,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -931,6 +1472,35 @@ paths:
     get:
       tags: [Course Offerings]
       summary: Get all course offerings
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: courseId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by course ID
+        - in: query
+          name: semesterId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by semester ID
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, CANCELLED]
+          description: Filter by status
       responses:
         '200':
           description: Course offerings list
@@ -941,6 +1511,8 @@ paths:
     post:
       tags: [Course Offerings]
       summary: Create a course offering
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -948,11 +1520,16 @@ paths:
             schema:
               $ref: '#/components/schemas/CourseOfferingCreate'
             example:
-              courseId: '123e4567-e89b-12d3-a456-426614174000'
-              semesterId: '123e4567-e89b-12d3-a456-426614174001'
-              section: 'A'
+              courseId: 123e4567-e89b-12d3-a456-426614174000
+              semesterId: 223e4567-e89b-12d3-a456-426614174001
+              section: A
+              instructor: Dr. John Smith
               expectedStudents: 30
               capacity: 35
+              day: Monday
+              time: 09:00-10:30
+              roomLabel: Room 101
+              notes: Lab session included
               status: ACTIVE
       responses:
         '201':
@@ -974,7 +1551,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -987,6 +1564,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Course Offering ID
     get:
       tags: [Course Offerings]
       summary: Get course offering by ID
@@ -1006,6 +1584,8 @@ paths:
     put:
       tags: [Course Offerings]
       summary: Update a course offering
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1013,11 +1593,10 @@ paths:
             schema:
               $ref: '#/components/schemas/CourseOfferingUpdate'
             example:
-              courseId: '123e4567-e89b-12d3-a456-426614174000'
-              semesterId: '123e4567-e89b-12d3-a456-426614174001'
-              section: 'B'
+              section: B
               expectedStudents: 25
               capacity: 30
+              instructor: Dr. Jane Doe
               status: ACTIVE
       responses:
         '200':
@@ -1039,7 +1618,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1053,6 +1632,8 @@ paths:
     delete:
       tags: [Course Offerings]
       summary: Delete a course offering
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Course offering deleted successfully
@@ -1067,7 +1648,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1082,6 +1663,22 @@ paths:
     get:
       tags: [Centers]
       summary: Get all centers
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Search by name or code
       responses:
         '200':
           description: Centers list
@@ -1092,6 +1689,8 @@ paths:
     post:
       tags: [Centers]
       summary: Create a center
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1101,6 +1700,9 @@ paths:
             example:
               name: Main Campus
               location: Downtown
+              code: MC
+              description: Primary examination center
+              isActive: true
       responses:
         '201':
           description: Center created successfully
@@ -1121,7 +1723,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1134,6 +1736,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Center ID
     get:
       tags: [Centers]
       summary: Get center by ID
@@ -1153,6 +1756,8 @@ paths:
     put:
       tags: [Centers]
       summary: Update a center
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1160,8 +1765,9 @@ paths:
             schema:
               $ref: '#/components/schemas/CenterUpdate'
             example:
-              name: Main Campus Updated
+              name: Main Campus (Updated)
               location: Downtown Area
+              isActive: true
       responses:
         '200':
           description: Center updated successfully
@@ -1182,7 +1788,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1196,6 +1802,8 @@ paths:
     delete:
       tags: [Centers]
       summary: Delete a center
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Center deleted successfully
@@ -1210,7 +1818,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1225,6 +1833,23 @@ paths:
     get:
       tags: [Rooms]
       summary: Get all rooms
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: centerId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by center ID
       responses:
         '200':
           description: Rooms list
@@ -1235,6 +1860,8 @@ paths:
     post:
       tags: [Rooms]
       summary: Create a room
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1242,9 +1869,10 @@ paths:
             schema:
               $ref: '#/components/schemas/RoomCreate'
             example:
-              centerId: '123e4567-e89b-12d3-a456-426614174002'
+              centerId: 123e4567-e89b-12d3-a456-426614174002
               name: A-101
               capacity: 50
+              status: AVAILABLE
       responses:
         '201':
           description: Room created successfully
@@ -1265,7 +1893,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1289,6 +1917,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Room ID
     get:
       tags: [Rooms]
       summary: Get room by ID
@@ -1308,6 +1937,8 @@ paths:
     put:
       tags: [Rooms]
       summary: Update a room
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1315,9 +1946,9 @@ paths:
             schema:
               $ref: '#/components/schemas/RoomUpdate'
             example:
-              centerId: '123e4567-e89b-12d3-a456-426614174002'
               name: A-102
               capacity: 45
+              status: AVAILABLE
       responses:
         '200':
           description: Room updated successfully
@@ -1338,7 +1969,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1352,6 +1983,8 @@ paths:
     delete:
       tags: [Rooms]
       summary: Delete a room
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Room deleted successfully
@@ -1366,7 +1999,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1381,6 +2014,29 @@ paths:
     get:
       tags: [Time Slots]
       summary: Get all time slots
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: startFrom
+          schema:
+            type: string
+            format: date-time
+          description: Filter from start date
+        - in: query
+          name: endTo
+          schema:
+            type: string
+            format: date-time
+          description: Filter to end date
       responses:
         '200':
           description: Time slots list
@@ -1391,6 +2047,8 @@ paths:
     post:
       tags: [Time Slots]
       summary: Create a time slot
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1398,8 +2056,9 @@ paths:
             schema:
               $ref: '#/components/schemas/TimeSlotCreate'
             example:
-              startTime: '2024-10-01T09:00:00Z'
-              endTime: '2024-10-01T11:00:00Z'
+              startTime: '2026-10-01T09:00:00Z'
+              endTime: '2026-10-01T11:00:00Z'
+              duration: 120
       responses:
         '201':
           description: Time slot created successfully
@@ -1420,7 +2079,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1429,6 +2088,29 @@ paths:
     get:
       tags: [Time Slots]
       summary: Get available time slots
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: startFrom
+          schema:
+            type: string
+            format: date-time
+          description: Filter from start date
+        - in: query
+          name: endTo
+          schema:
+            type: string
+            format: date-time
+          description: Filter to end date
       responses:
         '200':
           description: Available time slots returned
@@ -1444,6 +2126,7 @@ paths:
         schema:
           type: string
           format: uuid
+        description: TimeSlot ID
     get:
       tags: [Time Slots]
       summary: Get time slot by ID
@@ -1463,6 +2146,8 @@ paths:
     put:
       tags: [Time Slots]
       summary: Update a time slot
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1470,8 +2155,9 @@ paths:
             schema:
               $ref: '#/components/schemas/TimeSlotUpdate'
             example:
-              startTime: '2024-10-01T10:00:00Z'
-              endTime: '2024-10-01T12:00:00Z'
+              startTime: '2026-10-01T10:00:00Z'
+              endTime: '2026-10-01T12:00:00Z'
+              duration: 120
       responses:
         '200':
           description: Time slot updated successfully
@@ -1492,7 +2178,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1506,9 +2192,65 @@ paths:
     delete:
       tags: [Time Slots]
       summary: Delete a time slot
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Time slot deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Time slot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /enrollments:
+    get:
+      tags: [Enrollments]
+      summary: Get all enrollments
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
+        - in: query
+          name: studentId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by student ID
+        - in: query
+          name: courseOfferingId
+          schema:
+            type: string
+            format: uuid
+          description: Filter by course offering ID
+      responses:
+        '200':
+          description: Enrollments list
           content:
             application/json:
               schema:
@@ -1525,35 +2267,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Time slot not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /enrollments:
-    get:
-      tags: [Enrollments]
-      summary: Get all enrollments
-      responses:
-        '200':
-          description: Enrollments fetched successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
     post:
       tags: [Enrollments]
       summary: Create an enrollment
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/EnrollmentCreate'
+              $ref: '#/components/schemas/RegistrationCreate'
             example:
               studentId: '123e4567-e89b-12d3-a456-426614174003'
               courseOfferingId: '123e4567-e89b-12d3-a456-426614174004'
+              status: ACTIVE
       responses:
         '201':
           description: Enrollment created successfully
@@ -1574,7 +2302,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1583,18 +2311,22 @@ paths:
     post:
       tags: [Enrollments]
       summary: Bulk import enrollments
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/EnrollmentBulkImport'
+              $ref: '#/components/schemas/RegistrationBulkImport'
             example:
               enrollments:
                 - studentId: '123e4567-e89b-12d3-a456-426614174003'
                   courseOfferingId: '123e4567-e89b-12d3-a456-426614174004'
+                  status: ACTIVE
                 - studentId: '123e4567-e89b-12d3-a456-426614174005'
                   courseOfferingId: '123e4567-e89b-12d3-a456-426614174006'
+                  status: ACTIVE
       responses:
         '201':
           description: Enrollments imported successfully
@@ -1615,7 +2347,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1628,9 +2360,23 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Student ID
     get:
       tags: [Enrollments]
       summary: Get enrollments by student ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
       responses:
         '200':
           description: Student enrollments fetched successfully
@@ -1638,6 +2384,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Student not found
           content:
@@ -1652,9 +2410,23 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Course Offering ID
     get:
       tags: [Enrollments]
       summary: Get enrollments by course offering ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+          description: Page number
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Items per page
       responses:
         '200':
           description: Offering enrollments fetched successfully
@@ -1662,6 +2434,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Course offering not found
           content:
@@ -1676,9 +2460,12 @@ paths:
         schema:
           type: string
           format: uuid
+        description: Enrollment ID
     get:
       tags: [Enrollments]
       summary: Get enrollment by ID
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Enrollment fetched successfully
@@ -1686,6 +2473,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Enrollment not found
           content:
@@ -1695,15 +2494,18 @@ paths:
     put:
       tags: [Enrollments]
       summary: Update an enrollment
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/EnrollmentCreate'
+              $ref: '#/components/schemas/RegistrationUpdate'
             example:
               studentId: '123e4567-e89b-12d3-a456-426614174003'
               courseOfferingId: '123e4567-e89b-12d3-a456-426614174007'
+              status: ACTIVE
       responses:
         '200':
           description: Enrollment updated successfully
@@ -1724,7 +2526,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:
@@ -1738,6 +2540,8 @@ paths:
     delete:
       tags: [Enrollments]
       summary: Delete an enrollment
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Enrollment deleted successfully
@@ -1752,7 +2556,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Forbidden
+          description: Forbidden - Admin access required
           content:
             application/json:
               schema:

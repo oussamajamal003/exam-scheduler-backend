@@ -7,6 +7,9 @@ export const createCenterSchema = z.object({
   body: z.object({
     name: z.string().min(1),
     location: z.string().optional(),
+    code: z.string().optional(),
+    description: z.string().optional(),
+    isActive: z.boolean().optional().default(true),
   }),
 });
 
@@ -15,6 +18,9 @@ export const updateCenterSchema = z.object({
   body: z.object({
     name: z.string().min(1).optional(),
     location: z.string().optional(),
+    code: z.string().optional(),
+    description: z.string().optional(),
+    isActive: z.boolean().optional(),
   }),
 });
 

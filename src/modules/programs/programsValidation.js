@@ -7,6 +7,9 @@ export const createProgramSchema = z.object({
   body: z.object({
     name: z.string().min(1),
     code: z.string().min(1),
+    description: z.string().optional(),
+    departmentId: z.string().uuid().optional(),
+    isActive: z.boolean().optional().default(true),
   }),
 });
 
@@ -15,6 +18,9 @@ export const updateProgramSchema = z.object({
   body: z.object({
     name: z.string().min(1).optional(),
     code: z.string().min(1).optional(),
+    description: z.string().optional(),
+    departmentId: z.string().uuid().optional(),
+    isActive: z.boolean().optional(),
   }),
 });
 
