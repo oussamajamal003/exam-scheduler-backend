@@ -3,7 +3,38 @@ import { AppError } from '../../utils/AppError.js';
 
 const buildEnrollmentInclude = {
   student: { include: { user: { select: { id: true, name: true, email: true } }, program: true } },
-  courseOffering: { include: { course: true, semester: true } },
+  courseOffering: { include: { course: { include: { program: true } }, semester: true } },
+};
+
+const normalizeEnrollment = (enrollment) => {
+  if (!enrollment) return enrollment;
+
+  const course = enrollment.courseOffering?.course
+    ? {
+        ...enrollment.courseOffering.course,
+        name: enrollment.courseOffering.course.name ?? enrollment.courseOffering.course.title,
+      }
+    : null;
+  const courseOffering = enrollment.courseOffering
+    ? {
+        ...enrollment.courseOffering,
+        course,
+        program: course?.program ?? null,
+      }
+    : null;
+
+  return {
+    ...enrollment,
+    student: enrollment.student
+      ? {
+          ...enrollment.student,
+          fullName: enrollment.student.user?.name ?? null,
+        }
+      : null,
+    courseOffering,
+    program: courseOffering?.program ?? null,
+    semester: courseOffering?.semester ?? null,
+  };
 };
 
 export const getAll = async (query = {}) => {
@@ -32,7 +63,7 @@ export const getAll = async (query = {}) => {
     prisma.registration.count({ where })
   ]);
   
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeEnrollment), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
@@ -42,7 +73,7 @@ export const getById = async (id) => {
       student: { include: { user: { select: { id: true, name: true, email: true, role: true } }, program: true } },
       courseOffering: {
         include: {
-          course: true,
+          course: { include: { program: true } },
           semester: true,
           exams: true,
         },
@@ -50,7 +81,7 @@ export const getById = async (id) => {
     },
   });
   if (!data) throw new AppError('Not found', 404);
-  return data;
+  return normalizeEnrollment(data);
 };
 
 export const getByStudent = async (studentId, query = {}) => {
@@ -62,10 +93,11 @@ export const getByOffering = async (offeringId, query = {}) => {
 };
 
 export const create = async (data) => {
-  return await prisma.registration.create({
+  const enrollment = await prisma.registration.create({
     data,
     include: buildEnrollmentInclude,
   });
+  return normalizeEnrollment(enrollment);
 };
 
 export const bulkImport = async (items = []) => {
@@ -77,7 +109,7 @@ export const bulkImport = async (items = []) => {
         data: item,
         include: buildEnrollmentInclude,
       });
-      created.push(enrollment);
+      created.push(normalizeEnrollment(enrollment));
     }
 
     return created;
@@ -85,11 +117,12 @@ export const bulkImport = async (items = []) => {
 };
 
 export const update = async (id, data) => {
-  return await prisma.registration.update({
+  const enrollment = await prisma.registration.update({
     where: { id },
     data,
     include: buildEnrollmentInclude,
   });
+  return normalizeEnrollment(enrollment);
 };
 
 export const remove = async (id) => {

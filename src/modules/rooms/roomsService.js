@@ -1,6 +1,23 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const roomInclude = {
+  center: true,
+  assignments: {
+    include: {
+      schedule: true,
+      exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
+      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      timeSlot: true,
+    },
+  },
+};
+
+const normalizeRoom = (room) => ({
+  ...room,
+  status: room.status ? room.status.toLowerCase().replace(/^./, str => str.toUpperCase()) : 'Available',
+});
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -20,45 +37,21 @@ export const getAll = async (query = {}) => {
       where,
       skip,
       take: limit,
-      include: {
-        center: true,
-        _count: { select: { assignments: true } },
-      },
+      include: roomInclude,
     }),
     prisma.room.count({ where })
   ]);
   
-  // Transform status from database enum to frontend format
-  const transformedData = data.map(room => ({
-    ...room,
-    status: room.status ? room.status.toLowerCase().replace(/^./, str => str.toUpperCase()) : 'Available'
-  }));
-  
-  return { data: transformedData, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeRoom), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
   const data = await prisma.room.findUnique({
     where: { id },
-    include: {
-      center: true,
-      assignments: {
-        include: {
-          schedule: true,
-          exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
-          supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
-          timeSlot: true,
-        },
-      },
-    },
+    include: roomInclude,
   });
   if (!data) throw new AppError('Not found', 404);
-  
-  // Transform status from database enum to frontend format
-  return {
-    ...data,
-    status: data.status ? data.status.toLowerCase().replace(/^./, str => str.toUpperCase()) : 'Available'
-  };
+  return normalizeRoom(data);
 };
 
 export const create = async (data) => {
@@ -83,7 +76,8 @@ export const create = async (data) => {
   }
   
   data.centerId = centerId;
-  return await prisma.room.create({ data, include: { center: true } });
+  const room = await prisma.room.create({ data, include: roomInclude });
+  return normalizeRoom(room);
 };
 
 export const update = async (id, data) => {
@@ -102,7 +96,8 @@ export const update = async (id, data) => {
     data.status = data.status.toUpperCase();
   }
 
-  return await prisma.room.update({ where: { id }, data, include: { center: true } });
+  const room = await prisma.room.update({ where: { id }, data, include: roomInclude });
+  return normalizeRoom(room);
 };
 
 export const remove = async (id) => {
@@ -116,11 +111,6 @@ export const getAvailable = async (query) => {
   if (timeSlotId) {
     where.assignments = { none: { timeSlotId } };
   }
-  const data = await prisma.room.findMany({ where, include: { center: true } });
-  
-  // Transform status from database enum to frontend format
-  return data.map(room => ({
-    ...room,
-    status: room.status ? room.status.toLowerCase().replace(/^./, str => str.toUpperCase()) : 'Available'
-  }));
+  const data = await prisma.room.findMany({ where, include: roomInclude });
+  return data.map(normalizeRoom);
 };

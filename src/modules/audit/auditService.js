@@ -1,5 +1,35 @@
 import { getAuditUserId } from '../../middlewares/auditContext.js';
 
+const modelsWithCreatedBy = new Set([
+  'Student',
+  'Supervisor',
+  'Program',
+  'Semester',
+  'Course',
+  'CourseOffering',
+  'Center',
+  'Room',
+  'TimeSlot',
+  'Exam',
+  'ExamAssignment',
+]);
+
+const modelsWithUpdatedBy = new Set([
+  'Student',
+  'Supervisor',
+  'Program',
+  'Semester',
+  'Course',
+  'Center',
+  'Room',
+  'TimeSlot',
+]);
+
+// Convert PascalCase model name to camelCase for Prisma client access
+const getPrismaModelAccessor = (model) => {
+  return model.charAt(0).toLowerCase() + model.slice(1);
+};
+
 // Reusable audit logic pattern
 export const applyAuditExtension = (prismaClient) => {
   return prismaClient.$extends({
@@ -7,7 +37,7 @@ export const applyAuditExtension = (prismaClient) => {
       $allModels: {
         async create({ model, operation, args, query }) {
           const userId = getAuditUserId();
-          if (userId && args.data && model !== 'AuditLog') {
+          if (userId && args.data && model !== 'AuditLog' && modelsWithCreatedBy.has(model)) {
             args.data.createdBy = userId;
           }
           
@@ -34,8 +64,9 @@ export const applyAuditExtension = (prismaClient) => {
           const id = args.where?.id;
           let oldData = null;
           if (id && model !== 'AuditLog') {
-             oldData = await prismaClient[model.toLowerCase()].findUnique({ where: { id } });
-             if (userId && args.data) {
+             const modelAccessor = getPrismaModelAccessor(model);
+             oldData = await prismaClient[modelAccessor].findUnique({ where: { id } });
+             if (userId && args.data && modelsWithUpdatedBy.has(model)) {
                args.data.updatedBy = userId;
              }
           }
@@ -62,7 +93,8 @@ export const applyAuditExtension = (prismaClient) => {
           const id = args.where?.id;
           let oldData = null;
           if (id && model !== 'AuditLog') {
-             oldData = await prismaClient[model.toLowerCase()].findUnique({ where: { id } });
+             const modelAccessor = getPrismaModelAccessor(model);
+             oldData = await prismaClient[modelAccessor].findUnique({ where: { id } });
           }
 
           const result = await query(args);

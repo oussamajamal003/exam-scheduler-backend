@@ -1,6 +1,19 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const supervisorInclude = {
+  user: { select: { id: true, name: true, email: true, role: true } },
+  center: true,
+  assignments: {
+    include: {
+      schedule: true,
+      exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
+      room: true,
+      timeSlot: true,
+    },
+  },
+};
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -23,11 +36,7 @@ export const getAll = async (query = {}) => {
       where,
       skip,
       take: limit,
-      include: {
-        user: { select: { id: true, name: true, email: true, role: true } },
-        center: true,
-        _count: { select: { assignments: true } },
-      },
+      include: supervisorInclude,
     }),
     prisma.supervisor.count({ where })
   ]);
@@ -38,22 +47,7 @@ export const getAll = async (query = {}) => {
 export const getById = async (id) => {
   const data = await prisma.supervisor.findUnique({
     where: { id },
-    include: {
-      user: { select: { id: true, name: true, email: true, role: true } },
-      center: true,
-      assignments: {
-        include: {
-          schedule: true,
-          exam: {
-            include: {
-              courseOffering: { include: { course: true, semester: true } },
-            },
-          },
-          room: true,
-          timeSlot: true,
-        },
-      },
-    },
+    include: supervisorInclude,
   });
   if (!data) throw new AppError('Not found', 404);
   return data;
@@ -86,10 +80,7 @@ export const create = async (data) => {
   
   return await prisma.supervisor.create({
     data: { ...rest, userId, centerId },
-    include: {
-      user: { select: { id: true, name: true, email: true, role: true } },
-      center: true,
-    },
+    include: supervisorInclude,
   });
 };
 
@@ -120,10 +111,7 @@ export const update = async (id, data) => {
   return await prisma.supervisor.update({
     where: { id },
     data: updatePayload,
-    include: {
-      user: { select: { id: true, name: true, email: true, role: true } },
-      center: true,
-    },
+    include: supervisorInclude,
   });
 };
 

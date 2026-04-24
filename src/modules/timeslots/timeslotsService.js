@@ -1,6 +1,17 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const timeSlotInclude = {
+  assignments: {
+    include: {
+      schedule: true,
+      exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
+      room: true,
+      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+    },
+  },
+};
+
 const buildTimeSlotWhere = (query = {}, availableOnly = false) => {
   const where = {};
 
@@ -34,7 +45,8 @@ export const getAll = async (query = {}) => {
       where,
       skip,
       take: limit,
-      include: { _count: { select: { assignments: true } } },
+      orderBy: { startTime: 'asc' },
+      include: timeSlotInclude,
     }),
     prisma.timeSlot.count({ where })
   ]);
@@ -55,7 +67,7 @@ export const getAvailable = async (query = {}) => {
       skip,
       take: limit,
       orderBy: { startTime: 'asc' },
-      include: { _count: { select: { assignments: true } } },
+      include: timeSlotInclude,
     }),
     prisma.timeSlot.count({ where }),
   ]);
@@ -66,27 +78,18 @@ export const getAvailable = async (query = {}) => {
 export const getById = async (id) => {
   const data = await prisma.timeSlot.findUnique({
     where: { id },
-    include: {
-      assignments: {
-        include: {
-          schedule: true,
-          exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
-          room: true,
-          supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
-        },
-      },
-    },
+    include: timeSlotInclude,
   });
   if (!data) throw new AppError('Not found', 404);
   return data;
 };
 
 export const create = async (data) => {
-  return await prisma.timeSlot.create({ data });
+  return await prisma.timeSlot.create({ data, include: timeSlotInclude });
 };
 
 export const update = async (id, data) => {
-  return await prisma.timeSlot.update({ where: { id }, data });
+  return await prisma.timeSlot.update({ where: { id }, data, include: timeSlotInclude });
 };
 
 export const remove = async (id) => {

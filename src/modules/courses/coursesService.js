@@ -23,6 +23,17 @@ export const getAll = async (query = {}) => {
       take: limit,
       include: {
         program: true,
+        courseOfferings: {
+          orderBy: [
+            { semester: { isCurrent: 'desc' } },
+            { semester: { isActive: 'desc' } },
+            { createdAt: 'desc' },
+          ],
+          take: 1,
+          include: {
+            semester: true,
+          },
+        },
         _count: { select: { courseOfferings: true } },
       },
     }),
@@ -49,12 +60,50 @@ export const getById = async (id) => {
   return data;
 };
 
+const courseInclude = {
+  program: true,
+  courseOfferings: {
+    orderBy: [
+      { semester: { isCurrent: 'desc' } },
+      { semester: { isActive: 'desc' } },
+      { createdAt: 'desc' },
+    ],
+    take: 1,
+    include: { semester: true },
+  },
+};
+
 export const create = async (data) => {
-  return await prisma.course.create({ data, include: { program: true } });
+  const { semesterId, ...courseData } = data;
+
+  return prisma.$transaction(async (tx) => {
+    const course = await tx.course.create({ data: courseData, include: { program: true } });
+
+    if (semesterId) {
+      await tx.courseOffering.create({ data: { courseId: course.id, semesterId } });
+    }
+
+    return tx.course.findUnique({ where: { id: course.id }, include: courseInclude });
+  });
 };
 
 export const update = async (id, data) => {
-  return await prisma.course.update({ where: { id }, data, include: { program: true } });
+  const { semesterId, ...courseData } = data;
+
+  return prisma.$transaction(async (tx) => {
+    await tx.course.update({ where: { id }, data: courseData });
+
+    if (semesterId) {
+      const existing = await tx.courseOffering.findFirst({ where: { courseId: id } });
+      if (existing) {
+        await tx.courseOffering.update({ where: { id: existing.id }, data: { semesterId } });
+      } else {
+        await tx.courseOffering.create({ data: { courseId: id, semesterId } });
+      }
+    }
+
+    return tx.course.findUnique({ where: { id }, include: courseInclude });
+  });
 };
 
 export const remove = async (id) => {

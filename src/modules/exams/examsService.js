@@ -1,18 +1,30 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const examInclude = {
+  courseOffering: { include: { course: { include: { program: true } }, semester: true, registrations: true } },
+  assignments: {
+    include: {
+      schedule: true,
+      room: true,
+      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      timeSlot: true,
+    },
+  },
+};
+
 export const getAll = async (query) => {
   const { page = 1, limit = 10 } = query;
   const skip = (page - 1) * limit;
   const [data, total] = await Promise.all([
-    prisma.exam.findMany({ skip: parseInt(skip), take: parseInt(limit), include: { courseOffering: { include: { course: true } } } }),
+    prisma.exam.findMany({ skip: parseInt(skip), take: parseInt(limit), include: examInclude }),
     prisma.exam.count()
   ]);
   return { data, meta: { total, page: parseInt(page), limit: parseInt(limit) } };
 };
 
 export const getById = async (id) => {
-  const data = await prisma.exam.findUnique({ where: { id }, include: { courseOffering: { include: { course: true } }, assignments: true } });
+  const data = await prisma.exam.findUnique({ where: { id }, include: examInclude });
   if (!data) throw new AppError('Exam not found', 404);
   return data;
 };

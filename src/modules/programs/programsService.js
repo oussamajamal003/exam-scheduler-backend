@@ -26,6 +26,7 @@ export const getAll = async (query = {}) => {
       orderBy: { name: 'asc' },
       include: {
         department: true,
+        courses: true,
         _count: { select: { students: true, courses: true } },
       },
     }),
@@ -63,6 +64,7 @@ export const create = async (data) => {
     data,
     include: {
       department: true,
+      courses: true,
       _count: { select: { students: true, courses: true } },
     },
   });
@@ -74,6 +76,7 @@ export const update = async (id, data) => {
     data,
     include: {
       department: true,
+      courses: true,
       _count: { select: { students: true, courses: true } },
     },
   });

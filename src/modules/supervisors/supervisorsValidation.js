@@ -9,6 +9,7 @@ export const createSupervisorSchema = z.object({
     centerId: z.string().uuid().optional(),
     name: z.string().min(1).optional(),
     email: z.string().email().optional(),
+    department: z.string().min(1).optional(),
     center: z.string().min(1).optional(),
   }),
 });
@@ -18,6 +19,7 @@ export const updateSupervisorSchema = z.object({
   body: z.object({
     name: z.string().min(1).optional(),
     email: z.string().email().optional(),
+    department: z.string().min(1).optional(),
     center: z.string().min(1).optional(),
     userId: z.string().uuid().optional(),
     centerId: z.string().uuid().optional(),

@@ -1,6 +1,36 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const courseOfferingInclude = {
+  course: { include: { program: true } },
+  semester: true,
+  registrations: {
+    include: {
+      student: { include: { user: { select: { id: true, name: true, email: true } }, program: true } },
+    },
+  },
+  exams: true,
+  _count: { select: { registrations: true, exams: true } },
+};
+
+const normalizeCourseOffering = (offering) => {
+  if (!offering) return offering;
+
+  const course = offering.course
+    ? {
+        ...offering.course,
+        name: offering.course.name ?? offering.course.title,
+      }
+    : null;
+
+  return {
+    ...offering,
+    course,
+    program: course?.program ?? null,
+    enrollments: offering.registrations ?? [],
+  };
+};
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -24,23 +54,19 @@ export const getAll = async (query = {}) => {
       skip,
       take: limit,
       orderBy: [{ semester: { startDate: 'desc' } }, { course: { code: 'asc' } }],
-      include: {
-        course: true,
-        semester: true,
-        _count: { select: { registrations: true, exams: true } },
-      },
+      include: courseOfferingInclude,
     }),
     prisma.courseOffering.count({ where }),
   ]);
 
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeCourseOffering), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
   const data = await prisma.courseOffering.findUnique({
     where: { id },
     include: {
-      course: true,
+      course: { include: { program: true } },
       semester: true,
       registrations: {
         include: {
@@ -64,30 +90,24 @@ export const getById = async (id) => {
   });
 
   if (!data) throw new AppError('Course offering not found', 404);
-  return data;
+  return normalizeCourseOffering(data);
 };
 
 export const create = async (data) => {
-  return await prisma.courseOffering.create({
+  const offering = await prisma.courseOffering.create({
     data,
-    include: {
-      course: true,
-      semester: true,
-      _count: { select: { registrations: true, exams: true } },
-    },
+    include: courseOfferingInclude,
   });
+  return normalizeCourseOffering(offering);
 };
 
 export const update = async (id, data) => {
-  return await prisma.courseOffering.update({
+  const offering = await prisma.courseOffering.update({
     where: { id },
     data,
-    include: {
-      course: true,
-      semester: true,
-      _count: { select: { registrations: true, exams: true } },
-    },
+    include: courseOfferingInclude,
   });
+  return normalizeCourseOffering(offering);
 };
 
 export const remove = async (id) => {

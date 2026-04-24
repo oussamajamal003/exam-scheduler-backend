@@ -8,6 +8,26 @@ const buildSearchFilter = (search) => ({
   ],
 });
 
+const departmentInclude = {
+  programs: {
+    include: {
+      courses: true,
+      _count: { select: { students: true, courses: true } },
+    },
+  },
+  _count: { select: { programs: true } },
+};
+
+const normalizeDepartment = (department) => {
+  const courses = department.programs?.flatMap((program) => program.courses ?? []) ?? [];
+  return {
+    ...department,
+    courses,
+    totalCourses: courses.length,
+    programsCount: department.programs?.length ?? department._count?.programs ?? 0,
+  };
+};
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -24,50 +44,39 @@ export const getAll = async (query = {}) => {
       skip,
       take: limit,
       orderBy: { name: 'asc' },
-      include: {
-        _count: { select: { programs: true } },
-      },
+      include: departmentInclude,
     }),
     prisma.department.count({ where }),
   ]);
 
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeDepartment), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
   const data = await prisma.department.findUnique({
     where: { id },
-    include: {
-      programs: {
-        include: {
-          _count: { select: { students: true, courses: true } },
-        },
-      },
-      _count: { select: { programs: true } },
-    },
+    include: departmentInclude,
   });
 
   if (!data) throw new AppError('Department not found', 404);
-  return data;
+  return normalizeDepartment(data);
 };
 
 export const create = async (data) => {
-  return await prisma.department.create({
+  const department = await prisma.department.create({
     data,
-    include: {
-      _count: { select: { programs: true } },
-    },
+    include: departmentInclude,
   });
+  return normalizeDepartment(department);
 };
 
 export const update = async (id, data) => {
-  return await prisma.department.update({
+  const department = await prisma.department.update({
     where: { id },
     data,
-    include: {
-      _count: { select: { programs: true } },
-    },
+    include: departmentInclude,
   });
+  return normalizeDepartment(department);
 };
 
 export const remove = async (id) => {

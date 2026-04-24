@@ -301,13 +301,15 @@ export const getScheduleAnalysis = async (scheduleId) => {
             include: {
               courseOffering: {
                 include: {
+                  course: true,
+                  semester: true,
                   registrations: { select: { studentId: true } },
                 },
               },
             },
           },
           room: true,
-          supervisor: true,
+          supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
           timeSlot: true,
         },
       },

@@ -1,6 +1,22 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const centerInclude = {
+  rooms: true,
+  supervisors: {
+    include: {
+      user: { select: { id: true, name: true, email: true, role: true } },
+    },
+  },
+  _count: { select: { rooms: true, supervisors: true } },
+};
+
+const normalizeCenter = (center) => ({
+  ...center,
+  roomsCount: center.rooms?.length ?? center._count?.rooms ?? 0,
+  supervisorsCount: center.supervisors?.length ?? center._count?.supervisors ?? 0,
+});
+
 export const getAll = async (query = {}) => {
   const page = parseInt(query.page) || 1;
   const limit = parseInt(query.limit) || 10;
@@ -20,47 +36,39 @@ export const getAll = async (query = {}) => {
       skip,
       take: limit,
       orderBy: { name: 'asc' },
-      include: {
-        _count: { select: { rooms: true, supervisors: true } },
-      },
+      include: centerInclude,
     }),
     prisma.center.count({ where }),
   ]);
 
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeCenter), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
 export const getById = async (id) => {
   const data = await prisma.center.findUnique({
     where: { id },
-    include: {
-      rooms: true,
-      supervisors: {
-        include: {
-          user: { select: { id: true, name: true, email: true, role: true } },
-        },
-      },
-      _count: { select: { rooms: true, supervisors: true } },
-    },
+    include: centerInclude,
   });
 
   if (!data) throw new AppError('Center not found', 404);
-  return data;
+  return normalizeCenter(data);
 };
 
 export const create = async (data) => {
-  return await prisma.center.create({
+  const center = await prisma.center.create({
     data,
-    include: { _count: { select: { rooms: true, supervisors: true } } },
+    include: centerInclude,
   });
+  return normalizeCenter(center);
 };
 
 export const update = async (id, data) => {
-  return await prisma.center.update({
+  const center = await prisma.center.update({
     where: { id },
     data,
-    include: { _count: { select: { rooms: true, supervisors: true } } },
+    include: centerInclude,
   });
+  return normalizeCenter(center);
 };
 
 export const remove = async (id) => {

@@ -23,7 +23,7 @@ export const getAllStudents = async (query) => {
       where,
       skip,
       take: parsedLimit,
-      include: { user: { select: { name: true, email: true } }, program: true }
+      include: { user: { select: { name: true, email: true } }, program: { include: { department: true } } }
     }),
     prisma.student.count({ where }),
   ]);
@@ -44,7 +44,7 @@ export const getStudentById = async (id) => {
     where: { id },
     include: {
       user: { select: { name: true, email: true, role: true } },
-      program: true,
+      program: { include: { department: true } },
       registrations: { include: { courseOffering: { include: { course: true, semester: true } } } }
     },
   });
@@ -67,7 +67,7 @@ export const createStudent = async (data) => {
         universityId: data.universityId,
         programId: data.programId,
       },
-      include: { user: true, program: true }
+      include: { user: true, program: { include: { department: true } } }
     });
   }
 
@@ -95,7 +95,7 @@ export const createStudent = async (data) => {
         universityId: data.universityId,
         programId: data.programId,
       },
-      include: { user: true, program: true }
+      include: { user: true, program: { include: { department: true } } }
     });
   });
 };
@@ -144,7 +144,7 @@ export const updateStudent = async (id, data) => {
       return await tx.student.update({
         where: { id },
         data: nextStudentData,
-        include: { user: true, program: true },
+        include: { user: true, program: { include: { department: true } } },
       });
     });
   }
@@ -152,7 +152,7 @@ export const updateStudent = async (id, data) => {
   return await prisma.student.update({
     where: { id },
     data: nextStudentData,
-    include: { user: true, program: true },
+    include: { user: true, program: { include: { department: true } } },
   });
 };
 
