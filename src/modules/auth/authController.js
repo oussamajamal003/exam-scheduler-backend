@@ -1,11 +1,6 @@
-import { signupUser, loginUser, fetchAllUsers, removeUser } from './authService.js';
+import { loginUser, fetchAllUsers, removeUser } from './authService.js';
 import { sendResponse } from '../../utils/response.js';
 import { catchAsync } from '../../utils/catchAsync.js';
-
-export const signup = catchAsync(async (req, res) => {
-  const result = await signupUser(req.body);
-  sendResponse(res, 201, 'User created successfully', result);
-});
 
 export const login = catchAsync(async (req, res) => {
   const result = await loginUser(req.body);

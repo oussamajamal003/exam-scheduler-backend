@@ -12,13 +12,14 @@ import {
 import * as controller from './timeslotsController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getTimeSlotsSchema), controller.getAll);
-router.get('/available', validate(getAvailableTimeSlotsSchema), controller.getAvailable);
-router.post('/', authenticate, roleGuard(['TECH_ADMIN']), validate(createTimeSlotSchema), controller.create);
-router.get('/:id', validate(getTimeSlotSchema), controller.getById);
-router.put('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(updateTimeSlotSchema), controller.update);
-router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(getTimeSlotSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getTimeSlotsSchema), controller.getAll);
+router.get('/available', roleGuard(['ADMIN']), validate(getAvailableTimeSlotsSchema), controller.getAvailable);
+router.post('/', roleGuard(['ADMIN']), validate(createTimeSlotSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getTimeSlotSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateTimeSlotSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getTimeSlotSchema), controller.remove);
 
 export default router;
 

@@ -11,29 +11,12 @@ import {
 import * as controller from './departmentsController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getDepartmentsSchema), controller.getAll);
-router.post(
-  '/',
-  authenticate,
-  roleGuard(['TECH_ADMIN']),
-  validate(createDepartmentSchema),
-  controller.create
-);
-router.get('/:id', validate(getDepartmentSchema), controller.getById);
-router.put(
-  '/:id',
-  authenticate,
-  roleGuard(['TECH_ADMIN']),
-  validate(updateDepartmentSchema),
-  controller.update
-);
-router.delete(
-  '/:id',
-  authenticate,
-  roleGuard(['TECH_ADMIN']),
-  validate(getDepartmentSchema),
-  controller.remove
-);
+router.get('/', roleGuard(['ADMIN']), validate(getDepartmentsSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createDepartmentSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getDepartmentSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateDepartmentSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getDepartmentSchema), controller.remove);
 
 export default router;

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { uuidParamSchema } from '../../validations/common.js';
 
+const studentEmailSchema = z.string().email('Invalid email address').refine(
+  (email) => email.toLowerCase().endsWith('@st.uni.edu'),
+  'Student email must end with @st.uni.edu'
+);
+
 export const createStudentSchema = z.object({
   body: z.union([
     z.object({
@@ -20,7 +25,7 @@ export const createStudentSchema = z.object({
         .string()
         .min(2, "Last name must be at least 2 characters")
         .regex(/^[a-zA-Z\s]+$/, "Last name must contain only letters"),
-      email: z.string().email("Invalid email address"),
+      email: studentEmailSchema,
       universityId: z
         .string()
         .min(1, "University ID is required")
@@ -51,7 +56,7 @@ export const updateStudentSchema = z.object({
         .min(2, "Last name must be at least 2 characters")
         .regex(/^[a-zA-Z\s]+$/, "Last name must contain only letters")
         .optional(),
-      email: z.string().email("Invalid email address").optional(),
+      email: studentEmailSchema.optional(),
       universityId: z
         .string()
         .min(1, "University ID is required")

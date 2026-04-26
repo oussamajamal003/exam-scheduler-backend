@@ -1,6 +1,8 @@
 import { verifyToken } from '../utils/jwt.js';
+import { findUserById } from '../models/userModel.js';
+import { normalizeRole } from './roleGuard.js';
 
-export const authGuard = (req, res, next) => {
+export const authGuard = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -14,7 +16,24 @@ export const authGuard = (req, res, next) => {
 
   try {
     const decoded = verifyToken(token);
-    req.user = decoded; // Contains id and role
+    const user = await findUserById(decoded.id);
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User no longer exists.',
+      });
+    }
+
+    req.user = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: normalizeRole(user.role),
+      dbRole: user.role,
+      studentId: user.student?.id || null,
+      supervisorId: user.supervisor?.id || null,
+    };
     next();
   } catch (error) {
     return res.status(403).json({

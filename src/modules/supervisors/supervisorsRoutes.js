@@ -13,12 +13,12 @@ import * as controller from './supervisorsController.js';
 const router = express.Router();
 router.use(authenticate);
 
-router.get('/', validate(getSupervisorsSchema), controller.getAll);
-router.post('/', roleGuard(['TECH_ADMIN']), validate(createSupervisorSchema), controller.create);
-router.get('/:id/workload', validate(getSupervisorSchema), controller.getWorkload);
-router.get('/:id', validate(getSupervisorSchema), controller.getById);
-router.put('/:id', roleGuard(['TECH_ADMIN']), validate(updateSupervisorSchema), controller.update);
-router.delete('/:id', roleGuard(['TECH_ADMIN']), validate(getSupervisorSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getSupervisorsSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createSupervisorSchema), controller.create);
+router.get('/:id/workload', roleGuard(['ADMIN', 'SUPERVISOR']), validate(getSupervisorSchema), controller.getWorkload);
+router.get('/:id', roleGuard(['ADMIN', 'SUPERVISOR']), validate(getSupervisorSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateSupervisorSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getSupervisorSchema), controller.remove);
 
 export default router;
 

@@ -13,18 +13,34 @@ const examInclude = {
   },
 };
 
-export const getAll = async (query) => {
+const buildAccessWhere = (user) => {
+  if (user?.role === 'STUDENT') {
+    if (!user.studentId) throw new AppError('Student profile is not linked to this user', 403);
+    return { courseOffering: { registrations: { some: { studentId: user.studentId } } } };
+  }
+
+  if (user?.role === 'SUPERVISOR') {
+    if (!user.supervisorId) throw new AppError('Supervisor profile is not linked to this user', 403);
+    return { assignments: { some: { supervisorId: user.supervisorId } } };
+  }
+
+  return {};
+};
+
+export const getAll = async (query, user) => {
   const { page = 1, limit = 10 } = query;
   const skip = (page - 1) * limit;
+  const where = buildAccessWhere(user);
+
   const [data, total] = await Promise.all([
-    prisma.exam.findMany({ skip: parseInt(skip), take: parseInt(limit), include: examInclude }),
-    prisma.exam.count()
+    prisma.exam.findMany({ where, skip: parseInt(skip), take: parseInt(limit), include: examInclude }),
+    prisma.exam.count({ where })
   ]);
   return { data, meta: { total, page: parseInt(page), limit: parseInt(limit) } };
 };
 
-export const getById = async (id) => {
-  const data = await prisma.exam.findUnique({ where: { id }, include: examInclude });
+export const getById = async (id, user) => {
+  const data = await prisma.exam.findFirst({ where: { id, ...buildAccessWhere(user) }, include: examInclude });
   if (!data) throw new AppError('Exam not found', 404);
   return data;
 };

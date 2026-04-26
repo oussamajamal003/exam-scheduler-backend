@@ -8,12 +8,12 @@ export const getAllStudents = catchAsync(async (req, res) => {
 });
 
 export const getStudentById = catchAsync(async (req, res) => {
-  const student = await studentsService.getStudentById(req.params.id);
+  const student = await studentsService.getStudentById(req.params.id, req.user);
   sendResponse(res, 200, 'Student details retrieved', student);
 });
 
 export const createStudent = catchAsync(async (req, res) => {
-  const student = await studentsService.createStudent(req.body);
+  const student = await studentsService.createStudent(req.body, req.user);
   sendResponse(res, 201, 'Student created successfully', student);
 });
 
@@ -28,6 +28,6 @@ export const deleteStudent = catchAsync(async (req, res) => {
 });
 
 export const getStudentExams = catchAsync(async (req, res) => {
-  const exams = await studentsService.getStudentExams(req.params.id);
+  const exams = await studentsService.getStudentExams(req.params.id, req.user);
   sendResponse(res, 200, 'Student exams retrieved', exams);
 });

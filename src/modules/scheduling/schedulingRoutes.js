@@ -21,7 +21,7 @@ const router = express.Router();
 
 router.use(authenticate);
 // Restrict to admins running algorithms
-router.use(roleGuard(['SCHEDULING_ADMIN', 'TECH_ADMIN']));
+router.use(roleGuard(['ADMIN']));
 
 router.post('/prepare', validate(prepareSchedulingSchema), prepareScheduling);
 router.post('/validate-input', validate(validateInputSchema), validateInput);

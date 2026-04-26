@@ -11,11 +11,12 @@ import {
 import * as controller from './semestersController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getSemestersSchema), controller.getAll);
-router.post('/', authenticate, roleGuard(['TECH_ADMIN']), validate(createSemesterSchema), controller.create);
-router.get('/:id', validate(getSemesterSchema), controller.getById);
-router.put('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(updateSemesterSchema), controller.update);
-router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(getSemesterSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getSemestersSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createSemesterSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getSemesterSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateSemesterSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getSemesterSchema), controller.remove);
 
 export default router;

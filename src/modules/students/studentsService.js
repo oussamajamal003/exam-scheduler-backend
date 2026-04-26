@@ -1,6 +1,21 @@
 import prisma from '../../config/prisma.js';
 import bcrypt from 'bcrypt';
 import { AppError } from '../../utils/AppError.js';
+import { normalizeRole } from '../../guards/roleGuard.js';
+
+const isStudentEmail = (email) => email?.toLowerCase().endsWith('@st.uni.edu');
+
+const assertStudentEmail = (email) => {
+  if (!isStudentEmail(email)) {
+    throw new AppError('Student email must end with @st.uni.edu', 400);
+  }
+};
+
+const assertStudentAccess = (id, user) => {
+  if (user?.role === 'STUDENT' && user.studentId !== id) {
+    throw new AppError('You can only access your own student data', 403);
+  }
+};
 
 export const getAllStudents = async (query) => {
   const { page = 1, limit = 10, search, programId } = query;
@@ -39,7 +54,9 @@ export const getAllStudents = async (query) => {
   };
 };
 
-export const getStudentById = async (id) => {
+export const getStudentById = async (id, user) => {
+  assertStudentAccess(id, user);
+
   const student = await prisma.student.findUnique({
     where: { id },
     include: {
@@ -61,6 +78,13 @@ export const createStudent = async (data) => {
   // 1) Direct relation: userId + universityId (+ programId)
   // 2) Admin UI profile payload: firstName + lastName + email + universityId (+ programId)
   if (data.userId) {
+    const user = await prisma.user.findUnique({ where: { id: data.userId } });
+    if (!user) throw new AppError('User not found', 404);
+    assertStudentEmail(user.email);
+    if (normalizeRole(user.role) !== 'STUDENT') {
+      throw new AppError('Linked user must have STUDENT role', 400);
+    }
+
     return await prisma.student.create({
       data: {
         userId: data.userId,
@@ -72,6 +96,7 @@ export const createStudent = async (data) => {
   }
 
   const fullName = `${data.firstName} ${data.lastName}`.trim();
+  assertStudentEmail(data.email);
 
   const existingUser = await prisma.user.findUnique({ where: { email: data.email } });
   if (existingUser) throw new AppError('User with this email already exists', 409);
@@ -126,6 +151,7 @@ export const updateStudent = async (id, data) => {
       .trim();
 
     if (data.email && data.email !== student.user.email) {
+      assertStudentEmail(data.email);
       const duplicateUser = await prisma.user.findUnique({ where: { email: data.email } });
       if (duplicateUser && duplicateUser.id !== student.userId) {
         throw new AppError('User with this email already exists', 409);
@@ -163,7 +189,9 @@ export const deleteStudent = async (id) => {
   return await prisma.student.delete({ where: { id } });
 };
 
-export const getStudentExams = async (id) => {
+export const getStudentExams = async (id, user) => {
+  assertStudentAccess(id, user);
+
   // Finds exams for the registered course offerings of the student
   const student = await prisma.student.findUnique({
     where: { id },

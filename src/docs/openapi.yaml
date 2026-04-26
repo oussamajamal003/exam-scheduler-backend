@@ -48,22 +48,7 @@ components:
           format: email
         role:
           type: string
-          enum: [TECH_ADMIN, SCHEDULING_ADMIN, SUPERVISOR, STUDENT]
-    SignupRequest:
-      type: object
-      required: [name, email, password]
-      properties:
-        name:
-          type: string
-        email:
-          type: string
-          format: email
-        password:
-          type: string
-          format: password
-        role:
-          type: string
-          enum: [TECH_ADMIN, SCHEDULING_ADMIN, SUPERVISOR, STUDENT]
+          enum: [ADMIN, SUPERVISOR, STUDENT]
     LoginRequest:
       type: object
       required: [email, password]
@@ -721,35 +706,6 @@ paths:
                 $ref: '#/components/schemas/ApiResponse'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /auth/signup:
-    post:
-      tags: [Auth]
-      summary: Register a new user
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SignupRequest'
-            example:
-              name: John Doe
-              email: john.doe@example.com
-              password: securepassword123
-              role: STUDENT
-      responses:
-        '201':
-          description: User registered successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '400':
-          description: Validation error
           content:
             application/json:
               schema:

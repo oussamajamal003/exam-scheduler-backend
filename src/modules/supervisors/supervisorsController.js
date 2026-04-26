@@ -8,12 +8,12 @@ export const getAll = catchAsync(async (req, res) => {
 });
 
 export const getById = catchAsync(async (req, res) => {
-  const result = await service.getById(req.params.id);
+  const result = await service.getById(req.params.id, req.user);
   sendResponse(res, 200, 'supervisors details retrieved', result);
 });
 
 export const create = catchAsync(async (req, res) => {
-  const result = await service.create(req.body);
+  const result = await service.create(req.body, req.user);
   sendResponse(res, 201, 'supervisors created successfully', result);
 });
 
@@ -28,6 +28,6 @@ export const remove = catchAsync(async (req, res) => {
 });
 
 export const getWorkload = catchAsync(async (req, res) => {
-  const result = await service.getWorkload(req.params.id);
+  const result = await service.getWorkload(req.params.id, req.user);
   sendResponse(res, 200, 'Supervisor workload retrieved', result);
 });

@@ -5,6 +5,6 @@ import * as controller from './conflictsController.js';
 
 const router = express.Router();
 router.use(authenticate);
-router.post('/detect', roleGuard(['SCHEDULING_ADMIN', 'TECH_ADMIN']), controller.detect);
+router.post('/detect', roleGuard(['ADMIN']), controller.detect);
 
 export default router;

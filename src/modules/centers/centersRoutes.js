@@ -11,11 +11,12 @@ import {
 import * as controller from './centersController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getCentersSchema), controller.getAll);
-router.post('/', authenticate, roleGuard(['TECH_ADMIN']), validate(createCenterSchema), controller.create);
-router.get('/:id', validate(getCenterSchema), controller.getById);
-router.put('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(updateCenterSchema), controller.update);
-router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(getCenterSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getCentersSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createCenterSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getCenterSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateCenterSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getCenterSchema), controller.remove);
 
 export default router;

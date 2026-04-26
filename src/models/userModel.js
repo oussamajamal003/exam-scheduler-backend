@@ -9,6 +9,16 @@ export const findUserByEmail = async (email) => {
   });
 };
 
+export const findUserById = async (id) => {
+  return await prisma.user.findUnique({
+    where: { id },
+    include: {
+      student: { select: { id: true } },
+      supervisor: { select: { id: true } },
+    },
+  });
+};
+
 export const createUser = async (userData) => {
   // If the user is a student or supervisor, we might eventually want to auto-create
   // empty student/supervisor records here or in a separate endpoint.

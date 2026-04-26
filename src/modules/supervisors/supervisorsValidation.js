@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { uuidParamSchema } from '../../validations/common.js';
 
+const supervisorEmailSchema = z.string().email().refine(
+  (email) => {
+    const lower = email.toLowerCase();
+    return lower.endsWith('@uni.edu') && !lower.endsWith('@st.uni.edu');
+  },
+  'Supervisor email must end with @uni.edu and not @st.uni.edu'
+);
+
 export const getSupervisorSchema = uuidParamSchema;
 
 export const createSupervisorSchema = z.object({
@@ -8,7 +16,7 @@ export const createSupervisorSchema = z.object({
     userId: z.string().uuid().optional(),
     centerId: z.string().uuid().optional(),
     name: z.string().min(1).optional(),
-    email: z.string().email().optional(),
+    email: supervisorEmailSchema.optional(),
     department: z.string().min(1).optional(),
     center: z.string().min(1).optional(),
   }),
@@ -18,7 +26,7 @@ export const updateSupervisorSchema = z.object({
   params: uuidParamSchema.shape.params,
   body: z.object({
     name: z.string().min(1).optional(),
-    email: z.string().email().optional(),
+    email: supervisorEmailSchema.optional(),
     department: z.string().min(1).optional(),
     center: z.string().min(1).optional(),
     userId: z.string().uuid().optional(),

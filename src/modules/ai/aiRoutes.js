@@ -5,6 +5,6 @@ import * as controller from './aiController.js';
 
 const router = express.Router();
 router.use(authenticate);
-router.post('/evaluate-schedule/:scheduleId', roleGuard(['SCHEDULING_ADMIN', 'TECH_ADMIN']), controller.evaluateSchedule);
+router.post('/evaluate-schedule/:scheduleId', roleGuard(['ADMIN']), controller.evaluateSchedule);
 
 export default router;

@@ -15,13 +15,13 @@ const router = express.Router();
 // Middleware applied to all routes in this file
 router.use(authenticate);
 
-router.get('/', roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN']), validate(getStudentsSchema), controller.getAllStudents);
-router.post('/', roleGuard(['TECH_ADMIN']), validate(createStudentSchema), controller.createStudent);
+router.get('/', roleGuard(['ADMIN']), validate(getStudentsSchema), controller.getAllStudents);
+router.post('/', roleGuard(['ADMIN']), validate(createStudentSchema), controller.createStudent);
 
-router.get('/:id', validate(getStudentSchema), controller.getStudentById);
-router.put('/:id', roleGuard(['TECH_ADMIN']), validate(updateStudentSchema), controller.updateStudent);
-router.delete('/:id', roleGuard(['TECH_ADMIN']), validate(getStudentSchema), controller.deleteStudent);
+router.get('/:id', roleGuard(['ADMIN', 'STUDENT']), validate(getStudentSchema), controller.getStudentById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateStudentSchema), controller.updateStudent);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getStudentSchema), controller.deleteStudent);
 
-router.get('/:id/exams', validate(getStudentSchema), controller.getStudentExams);
+router.get('/:id/exams', roleGuard(['ADMIN', 'STUDENT']), validate(getStudentSchema), controller.getStudentExams);
 
 export default router;

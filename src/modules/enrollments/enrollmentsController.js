@@ -3,22 +3,22 @@ import { sendResponse } from '../../utils/response.js';
 import { catchAsync } from '../../utils/catchAsync.js';
 
 export const getAll = catchAsync(async (req, res) => {
-  const result = await service.getAll(req.query);
+  const result = await service.getAll(req.query, req.user);
   sendResponse(res, 200, 'Enrollments fetched successfully', result);
 });
 
 export const getById = catchAsync(async (req, res) => {
-  const result = await service.getById(req.params.id);
+  const result = await service.getById(req.params.id, req.user);
   sendResponse(res, 200, 'Enrollment details retrieved', result);
 });
 
 export const getByStudent = catchAsync(async (req, res) => {
-  const result = await service.getByStudent(req.params.studentId, req.query);
+  const result = await service.getByStudent(req.params.studentId, req.query, req.user);
   sendResponse(res, 200, 'Student enrollments fetched successfully', result);
 });
 
 export const getByOffering = catchAsync(async (req, res) => {
-  const result = await service.getByOffering(req.params.offeringId, req.query);
+  const result = await service.getByOffering(req.params.offeringId, req.query, req.user);
   sendResponse(res, 200, 'Course offering enrollments fetched successfully', result);
 });
 

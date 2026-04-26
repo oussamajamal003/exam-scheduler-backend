@@ -11,11 +11,12 @@ import {
 import * as controller from './courseOfferingsController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getCourseOfferingsSchema), controller.getAll);
-router.post('/', authenticate, roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN']), validate(createCourseOfferingSchema), controller.create);
-router.get('/:id', validate(getCourseOfferingSchema), controller.getById);
-router.put('/:id', authenticate, roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN']), validate(updateCourseOfferingSchema), controller.update);
-router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN', 'SCHEDULING_ADMIN']), validate(getCourseOfferingSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getCourseOfferingsSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createCourseOfferingSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getCourseOfferingSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateCourseOfferingSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getCourseOfferingSchema), controller.remove);
 
 export default router;

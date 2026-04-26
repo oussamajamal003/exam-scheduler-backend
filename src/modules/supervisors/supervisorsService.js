@@ -1,5 +1,25 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import bcrypt from 'bcrypt';
+import { normalizeRole } from '../../guards/roleGuard.js';
+
+const isSupervisorEmail = (email) => {
+  if (!email) return false;
+  const lower = email.toLowerCase();
+  return lower.endsWith('@uni.edu') && !lower.endsWith('@st.uni.edu');
+};
+
+const assertSupervisorEmail = (email) => {
+  if (!isSupervisorEmail(email)) {
+    throw new AppError('Supervisor email must end with @uni.edu and not @st.uni.edu', 400);
+  }
+};
+
+const assertSupervisorAccess = (id, user) => {
+  if (user?.role === 'SUPERVISOR' && user.supervisorId !== id) {
+    throw new AppError('You can only access your own supervisor data', 403);
+  }
+};
 
 const supervisorInclude = {
   user: { select: { id: true, name: true, email: true, role: true } },
@@ -44,7 +64,9 @@ export const getAll = async (query = {}) => {
   return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
 };
 
-export const getById = async (id) => {
+export const getById = async (id, user) => {
+  assertSupervisorAccess(id, user);
+
   const data = await prisma.supervisor.findUnique({
     where: { id },
     include: supervisorInclude,
@@ -55,12 +77,24 @@ export const getById = async (id) => {
 
 export const create = async (data) => {
   let { userId, centerId, name, email, center, ...rest } = data;
+
+  if (userId) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError('User not found', 404);
+    assertSupervisorEmail(user.email);
+    if (normalizeRole(user.role) !== 'SUPERVISOR') {
+      throw new AppError('Linked user must have SUPERVISOR role', 400);
+    }
+  }
   
   if (!userId && (name && email)) {
+    assertSupervisorEmail(email);
+    const hashedPassword = await bcrypt.hash(`${email.split('@')[0]}@Temp123`, 10);
+
     const user = await prisma.user.upsert({
       where: { email },
-      update: { name, role: 'SUPERVISOR' },
-      create: { name, email, password: 'password123', role: 'SUPERVISOR' }
+      update: { name, password: hashedPassword, role: 'SUPERVISOR' },
+      create: { name, email, password: hashedPassword, role: 'SUPERVISOR' }
     });
     userId = user.id;
   }
@@ -89,8 +123,11 @@ export const update = async (id, data) => {
   const updatePayload = { ...rest };
   
   const existing = await prisma.supervisor.findUnique({ where: { id }, select: { userId: true } });
+  if (!existing) throw new AppError('Supervisor not found', 404);
   
   if (name || email) {
+    if (email) assertSupervisorEmail(email);
+
     await prisma.user.update({
       where: { id: existing.userId },
       data: { ...(name && { name }), ...(email && { email }) }
@@ -119,7 +156,9 @@ export const remove = async (id) => {
   return await prisma.supervisor.delete({ where: { id } });
 };
 
-export const getWorkload = async (id) => {
+export const getWorkload = async (id, user) => {
+  assertSupervisorAccess(id, user);
+
   const supervisor = await prisma.supervisor.findUnique({
     where: { id },
     include: { assignments: { include: { timeSlot: true, exam: { include: { courseOffering: { include: { course: true } } } } } } }

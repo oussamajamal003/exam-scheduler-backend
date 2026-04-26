@@ -2,11 +2,13 @@ import logger from './utils/logger.js';
 import app from './app.js';
 import { connectDB } from './config/db.js';
 import { config } from './config/env.js';
+import { ensureAdminUsers } from './modules/auth/authService.js';
 
 const startServer = async () => {
   try {
     // 1. Connect to Database first
     await connectDB();
+    await ensureAdminUsers();
 
     // 2. Start Express Server
     const server = app.listen(config.port, () => {

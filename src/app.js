@@ -5,6 +5,7 @@ import YAML from 'yamljs';
 import { fileURLToPath } from 'url';
 import { errorHandler } from './middlewares/errorHandler.js';
 import { requestLogger } from './middlewares/requestLogger.js';
+import { authenticate } from './middlewares/authMiddleware.js';
 
 const swaggerDocument = YAML.load(
     fileURLToPath(new URL('./docs/openapi.yaml', import.meta.url))
@@ -40,6 +41,8 @@ import aiRoutes from './modules/ai/aiRoutes.js';
 
 // Routes (existing)
 app.use('/api/auth', authRoutes);
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+app.use('/api', authenticate);
 app.use('/api/students', studentRoutes);
 app.use('/api/scheduling', schedulingRoutes);
 app.use('/api/supervisors', supervisorRoutes);
@@ -55,8 +58,6 @@ app.use('/api/timeslots', timeSlotRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/conflicts', conflictRoutes);
 app.use('/api/ai', aiRoutes);
-
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // Global Error Handler (must be last middleware)
 app.use(errorHandler);

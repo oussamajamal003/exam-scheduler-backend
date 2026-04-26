@@ -11,11 +11,12 @@ import {
 import * as controller from './programsController.js';
 
 const router = express.Router();
+router.use(authenticate);
 
-router.get('/', validate(getProgramsSchema), controller.getAll);
-router.post('/', authenticate, roleGuard(['TECH_ADMIN']), validate(createProgramSchema), controller.create);
-router.get('/:id', validate(getProgramSchema), controller.getById);
-router.put('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(updateProgramSchema), controller.update);
-router.delete('/:id', authenticate, roleGuard(['TECH_ADMIN']), validate(getProgramSchema), controller.remove);
+router.get('/', roleGuard(['ADMIN']), validate(getProgramsSchema), controller.getAll);
+router.post('/', roleGuard(['ADMIN']), validate(createProgramSchema), controller.create);
+router.get('/:id', roleGuard(['ADMIN']), validate(getProgramSchema), controller.getById);
+router.put('/:id', roleGuard(['ADMIN']), validate(updateProgramSchema), controller.update);
+router.delete('/:id', roleGuard(['ADMIN']), validate(getProgramSchema), controller.remove);
 
 export default router;
