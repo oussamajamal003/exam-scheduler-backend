@@ -20,11 +20,12 @@ app.use(express.urlencoded({ extended: true }));
 
 // Setup Request Logger
 app.use(requestLogger);
-
+ 
 // Modular Routes
 import authRoutes from './modules/auth/authRoutes.js';
 import studentRoutes from './modules/students/studentsRoutes.js';
 import schedulingRoutes from './modules/scheduling/schedulingRoutes.js';
+import scheduleRoutes from './modules/schedules/schedulesRoutes.js';
 import supervisorRoutes from './modules/supervisors/supervisorsRoutes.js';
 import roomRoutes from './modules/rooms/roomsRoutes.js';
 import courseRoutes from './modules/courses/coursesRoutes.js';
@@ -45,6 +46,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 app.use('/api', authenticate);
 app.use('/api/students', studentRoutes);
 app.use('/api/scheduling', schedulingRoutes);
+app.use('/api/schedules', scheduleRoutes);
 app.use('/api/supervisors', supervisorRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/courses', courseRoutes);

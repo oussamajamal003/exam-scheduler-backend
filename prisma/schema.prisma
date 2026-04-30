@@ -74,8 +74,10 @@ model Student {
   program      Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
   universityId String   @unique
 
-  registrations Registration[]
 
+  registrations Registration[]
+  
+  @@index([programId])
   @@map("students")
   createdBy   String?
   updatedBy   String?
@@ -163,7 +165,8 @@ model Course {
   updatedAt    DateTime       @updatedAt
 
   courseOfferings CourseOffering[]
-
+  
+  @@index([programId])
   @@map("courses")
   createdBy   String?
   updatedBy   String?
@@ -183,6 +186,8 @@ model CourseOffering {
   time         String?
   roomLabel    String?
   notes        String?
+  priority   Int?   // higher = schedule earlier
+  difficulty Int?   // harder exam (needs spacing)
   status           OfferingStatus @default(ACTIVE)
   createdBy        String?
   createdAt    DateTime       @default(now())
@@ -267,6 +272,7 @@ model TimeSlot {
   assignments ExamAssignment[]
 
   @@unique([startTime, endTime])
+  @@index([date])
   @@map("time_slots")
   createdBy   String?
   updatedBy   String?
