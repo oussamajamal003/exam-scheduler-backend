@@ -146,6 +146,7 @@ model Semester {
   updatedAt    DateTime       @updatedAt
 
   courseOfferings CourseOffering[]
+  courses         Course[]
 
   @@map("semesters")
   createdBy   String?
@@ -154,10 +155,12 @@ model Semester {
 
 model Course {
   id        String   @id @default(uuid())
-  code      String   @unique
+  code      String
   title     String
   programId String?
   program   Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
+  semesterId String?
+  semester   Semester? @relation(fields: [semesterId], references: [id], onDelete: SetNull)
   credits      Int?
   description  String?
   isActive     Boolean        @default(true)
@@ -166,7 +169,9 @@ model Course {
 
   courseOfferings CourseOffering[]
   
+  @@unique([code, semesterId])
   @@index([programId])
+  @@index([semesterId])
   @@map("courses")
   createdBy   String?
   updatedBy   String?

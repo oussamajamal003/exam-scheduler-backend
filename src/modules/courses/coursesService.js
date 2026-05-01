@@ -23,6 +23,7 @@ export const getAll = async (query = {}) => {
       take: limit,
       include: {
         program: true,
+        semester: true,
         courseOfferings: {
           orderBy: [
             { semester: { isCurrent: 'desc' } },
@@ -48,6 +49,7 @@ export const getById = async (id) => {
     where: { id },
     include: {
       program: true,
+      semester: true,
       courseOfferings: {
         include: {
           semester: true,
@@ -62,6 +64,7 @@ export const getById = async (id) => {
 
 const courseInclude = {
   program: true,
+  semester: true,
   courseOfferings: {
     orderBy: [
       { semester: { isCurrent: 'desc' } },
@@ -74,36 +77,72 @@ const courseInclude = {
 };
 
 export const create = async (data) => {
-  const { semesterId, ...courseData } = data;
+  const courseData = { ...data };
+  if (!courseData.semesterId) courseData.semesterId = null;
 
-  return prisma.$transaction(async (tx) => {
-    const course = await tx.course.create({ data: courseData, include: { program: true } });
-
-    if (semesterId) {
-      await tx.courseOffering.create({ data: { courseId: course.id, semesterId } });
-    }
-
-    return tx.course.findUnique({ where: { id: course.id }, include: courseInclude });
+  // Friendly check for the [code, semesterId] uniqueness so we can return a
+  // clear message: the same course code is allowed across different semesters,
+  // but not within the same semester (or twice with no semester).
+  const existing = await prisma.course.findFirst({
+    where: { code: courseData.code, semesterId: courseData.semesterId },
+    select: { id: true, semester: { select: { name: true } } },
   });
+  if (existing) {
+    const where = existing.semester?.name
+      ? `in ${existing.semester.name}`
+      : 'with no semester assigned';
+    throw new AppError(
+      `A course with code "${courseData.code}" already exists ${where}. Pick a different semester to create another.`,
+      409
+    );
+  }
+
+  const course = await prisma.course.create({
+    data: courseData,
+    include: { program: true },
+  });
+
+  return prisma.course.findUnique({ where: { id: course.id }, include: courseInclude });
 };
 
 export const update = async (id, data) => {
-  const { semesterId, ...courseData } = data;
+  const courseData = { ...data };
+  if ('semesterId' in courseData && !courseData.semesterId) {
+    courseData.semesterId = null;
+  }
 
-  return prisma.$transaction(async (tx) => {
-    await tx.course.update({ where: { id }, data: courseData });
-
-    if (semesterId) {
-      const existing = await tx.courseOffering.findFirst({ where: { courseId: id } });
-      if (existing) {
-        await tx.courseOffering.update({ where: { id: existing.id }, data: { semesterId } });
-      } else {
-        await tx.courseOffering.create({ data: { courseId: id, semesterId } });
-      }
+  // If code or semesterId is changing, ensure the new pair is still unique.
+  if (courseData.code !== undefined || 'semesterId' in courseData) {
+    const current = await prisma.course.findUnique({
+      where: { id },
+      select: { code: true, semesterId: true },
+    });
+    if (!current) throw new AppError('Not found', 404);
+    const nextCode = courseData.code ?? current.code;
+    const nextSemesterId =
+      'semesterId' in courseData ? courseData.semesterId : current.semesterId;
+    const clash = await prisma.course.findFirst({
+      where: {
+        code: nextCode,
+        semesterId: nextSemesterId,
+        NOT: { id },
+      },
+      select: { id: true, semester: { select: { name: true } } },
+    });
+    if (clash) {
+      const where = clash.semester?.name
+        ? `in ${clash.semester.name}`
+        : 'with no semester assigned';
+      throw new AppError(
+        `A course with code "${nextCode}" already exists ${where}.`,
+        409
+      );
     }
+  }
 
-    return tx.course.findUnique({ where: { id }, include: courseInclude });
-  });
+  await prisma.course.update({ where: { id }, data: courseData });
+
+  return prisma.course.findUnique({ where: { id }, include: courseInclude });
 };
 
 export const remove = async (id) => {

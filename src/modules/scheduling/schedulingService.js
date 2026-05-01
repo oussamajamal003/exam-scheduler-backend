@@ -14,7 +14,7 @@ const getUniqueStudentIdsFromRegistrations = (registrations = []) => {
 const getUniqueStudentIdsForExam = (exam) => {
   return getUniqueStudentIdsFromRegistrations(exam.courseOffering?.registrations ?? []);
 };
-
+ 
 const getRequiredSeatsForExam = (exam) => {
   const registered = exam.courseOffering?.registrations?.length ?? exam.studentCount ?? 0;
   const expected = exam.courseOffering?.expectedStudents ?? exam.expectedStudents ?? 0;

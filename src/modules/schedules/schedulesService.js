@@ -5,7 +5,25 @@ const scheduleInclude = {
   _count: { select: { assignments: true, conflicts: true } },
   assignments: {
     include: {
-      exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
+      exam: {
+        include: {
+          courseOffering: {
+            include: {
+              course: true,
+              semester: true,
+              registrations: {
+                include: {
+                  student: {
+                    include: {
+                      user: { select: { id: true, name: true, email: true } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       room: { include: { center: true } },
       supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
       timeSlot: true,
