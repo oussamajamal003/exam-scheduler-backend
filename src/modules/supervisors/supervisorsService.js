@@ -161,7 +161,21 @@ export const getWorkload = async (id, user) => {
 
   const supervisor = await prisma.supervisor.findUnique({
     where: { id },
-    include: { assignments: { include: { timeSlot: true, exam: { include: { courseOffering: { include: { course: true } } } } } } }
+    include: {
+      assignments: {
+        include: {
+          timeSlot: true,
+          room: true,
+          exam: {
+            include: {
+              courseOffering: {
+                include: { course: true, semester: true },
+              },
+            },
+          },
+        },
+      },
+    },
   });
   if (!supervisor) throw new AppError('Supervisor not found', 404);
   return { workloadCount: supervisor.assignments.length, assignments: supervisor.assignments };

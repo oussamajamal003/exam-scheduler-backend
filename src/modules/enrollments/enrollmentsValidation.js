@@ -52,7 +52,7 @@ export const updateEnrollmentSchema = z.object({
 export const getEnrollmentsSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
     studentId: z.string().uuid().optional(),
     courseOfferingId: z.string().uuid().optional(),
     semesterId: z.string().uuid().optional(),

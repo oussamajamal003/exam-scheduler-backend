@@ -39,6 +39,7 @@ import timeSlotRoutes from './modules/timeslots/timeslotsRoutes.js';
 import enrollmentRoutes from './modules/enrollments/enrollmentsRoutes.js';
 import conflictRoutes from './modules/conflicts/conflictsRoutes.js';
 import aiRoutes from './modules/ai/aiRoutes.js';
+import demoDataRoutes from './modules/demoData/demoDataRoutes.js';
 
 // Routes (existing)
 app.use('/api/auth', authRoutes);
@@ -60,6 +61,7 @@ app.use('/api/timeslots', timeSlotRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/conflicts', conflictRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/demo-data', demoDataRoutes);
 
 // Global Error Handler (must be last middleware)
 app.use(errorHandler);

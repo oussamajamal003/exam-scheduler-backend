@@ -31,7 +31,7 @@ export const updateSemesterSchema = z.object({
 export const getSemestersSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
     search: z.string().optional(),
     isActive: z.coerce.boolean().optional(),
   }).catchall(z.any()),

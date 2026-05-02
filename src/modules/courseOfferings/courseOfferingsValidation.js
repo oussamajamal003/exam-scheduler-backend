@@ -46,7 +46,7 @@ export const updateCourseOfferingSchema = z.object({
 export const getCourseOfferingsSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
     search: z.string().optional(),
     courseId: z.string().uuid().optional(),
     semesterId: z.string().uuid().optional(),

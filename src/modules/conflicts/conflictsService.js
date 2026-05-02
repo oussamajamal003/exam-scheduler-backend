@@ -43,6 +43,7 @@ const loadScheduleForDetection = async (scheduleId) => {
             },
           },
           room: true,
+          room: { include: { center: true } },
           supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
           timeSlot: true,
         },
@@ -57,7 +58,7 @@ const loadScheduleForDetection = async (scheduleId) => {
 // -------------------- label helpers --------------------
 const getExamCourseLabel = (assignment) => {
   const course = assignment.exam?.courseOffering?.course;
-  return course?.code ?? course?.title ?? null;
+  return [course?.code, course?.title].filter(Boolean).join(' — ') || null;
 };
 
 const getSlotLabel = (assignment) => {
@@ -66,7 +67,12 @@ const getSlotLabel = (assignment) => {
   return new Date(slot.startTime).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 };
 
-const getRoomLabel = (assignment) => assignment.room?.name ?? null;
+const getRoomLabel = (assignment) => {
+  const roomName = assignment.room?.name;
+  const centerName = assignment.room?.center?.name;
+  if (!roomName) return null;
+  return centerName ? `${roomName} at ${centerName}` : roomName;
+};
 
 const getSupervisorLabel = (assignment) =>
   assignment.supervisor?.user?.name ?? null;
@@ -108,7 +114,7 @@ const computeConflicts = (schedule) => {
     const distinctExams = new Set(assignments.map((a) => a.examId));
     if (distinctExams.size < 2) continue;
     const [studentId] = key.split(':');
-    const studentLabel = getStudentLabel(studentId) ?? `Student \u2026${studentId.slice(-8)}`;
+    const studentLabel = getStudentLabel(studentId) ?? 'A student';
     const slotLabel = getSlotLabel(assignments[0]);
     const examLabels = [...new Set(assignments.map((a) => getExamCourseLabel(a)).filter(Boolean))].join(', ');
     conflicts.push({
@@ -179,7 +185,7 @@ const computeConflicts = (schedule) => {
   // 5) RESOURCE_UNAVAILABLE — room marked non-AVAILABLE
   for (const assignment of schedule.assignments) {
     if (assignment.room?.status && assignment.room.status !== 'AVAILABLE') {
-      const roomLabel = getRoomLabel(assignment) ?? assignment.roomId;
+      const roomLabel = getRoomLabel(assignment) ?? 'an unavailable room';
       const examLabel = getExamCourseLabel(assignment) ?? 'an exam';
       conflicts.push({
         type: 'RESOURCE_UNAVAILABLE',

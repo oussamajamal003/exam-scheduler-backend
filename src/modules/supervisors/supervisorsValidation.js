@@ -37,7 +37,7 @@ export const updateSupervisorSchema = z.object({
 export const getSupervisorsSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
+    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
     search: z.string().optional(),
     centerId: z.string().uuid().optional(),
     userId: z.string().uuid().optional(),

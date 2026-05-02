@@ -2,6 +2,18 @@ import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const DEFAULT_EXAM_DURATION = 120;
+const SUPERVISOR_RATIO = 30; // 1 supervisor per 30 students
+const getRequiredSupervisorCount = (studentCount) => {
+  if (studentCount <= 0) return 1;
+  return Math.ceil(studentCount / SUPERVISOR_RATIO);
+};
+const REQUIRED_CONFLICT_TYPES = [
+  'ROOM_OVERCAPACITY',
+  'STUDENT_OVERLAP',
+  'SUPERVISOR_DOUBLE_BOOKED',
+  'RESOURCE_UNAVAILABLE',
+  'TIME_CONSTRAINT_VIOLATION',
+];
 
 const getUniqueStudentIdsFromRegistrations = (registrations = []) => {
   const ids = new Set();
@@ -137,7 +149,14 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
       include: {
         course: true,
         semester: true,
-        registrations: { select: { id: true, studentId: true, status: true } },
+        registrations: {
+          select: {
+            id: true,
+            studentId: true,
+            status: true,
+            student: { select: { user: { select: { name: true, email: true } } } },
+          },
+        },
         exams: true,
         _count: { select: { registrations: true } },
       },
@@ -183,12 +202,30 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
   return { semester, normalized, createdExamCount };
 };
 
+// Returns true when two half-open time ranges [startA, endA) and [startB, endB) share any overlap.
+const timeRangesOverlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
+
+// Push a {start, end} entry into a per-key list inside a Map.
+const addTimeRange = (map, key, start, end) => {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push({ start, end });
+};
+
+// Check whether `slot` overlaps any already-recorded range for `key`.
+const hasTemporalOverlap = (map, key, slot) => {
+  const ranges = map.get(key);
+  if (!ranges || !slot.startTime || !slot.endTime) return false;
+  return ranges.some(({ start, end }) => timeRangesOverlap(slot.startTime, slot.endTime, start, end));
+};
+
 const createUsageTracker = (existingAssignments = []) => {
   const usage = {
     roomSlotUsed: new Set(),
     supervisorSlotUsed: new Set(),
     studentSlotMap: new Map(),
     supervisorDayCount: new Map(),
+    supervisorTimeRanges: new Map(), // temporal overlap guard
+    roomTimeRanges: new Map(),       // temporal overlap guard
   };
 
   for (const assignment of existingAssignments) {
@@ -201,6 +238,12 @@ const createUsageTracker = (existingAssignments = []) => {
     if (slotDate) {
       const key = `${assignment.supervisorId}:${toDateKey(slotDate)}`;
       usage.supervisorDayCount.set(key, (usage.supervisorDayCount.get(key) ?? 0) + 1);
+    }
+
+    const ts = assignment.timeSlot;
+    if (ts?.startTime && ts?.endTime) {
+      addTimeRange(usage.supervisorTimeRanges, assignment.supervisorId, ts.startTime, ts.endTime);
+      addTimeRange(usage.roomTimeRanges, assignment.roomId, ts.startTime, ts.endTime);
     }
 
     for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
@@ -217,6 +260,11 @@ const reserveAssignment = (usage, assignment, exam, slot, slotDayKey = toDateKey
 
   const supervisorDayKey = `${assignment.supervisorId}:${slotDayKey}`;
   usage.supervisorDayCount.set(supervisorDayKey, (usage.supervisorDayCount.get(supervisorDayKey) ?? 0) + 1);
+
+  if (slot.startTime && slot.endTime) {
+    addTimeRange(usage.supervisorTimeRanges, assignment.supervisorId, slot.startTime, slot.endTime);
+    addTimeRange(usage.roomTimeRanges, assignment.roomId, slot.startTime, slot.endTime);
+  }
 
   for (const studentId of exam.studentIds) {
     addToNestedSet(usage.studentSlotMap, studentId, assignment.timeSlotId);
@@ -236,11 +284,15 @@ const sortRoomsByCapacityDesc = (rooms) => {
 };
 
 const isRoomAvailableForSlot = (room, slot, usage) => {
-  return room.status === 'AVAILABLE' && !usage.roomSlotUsed.has(`${room.id}:${slot.id}`);
+  if (room.status !== 'AVAILABLE') return false;
+  if (usage.roomSlotUsed.has(`${room.id}:${slot.id}`)) return false;
+  if (hasTemporalOverlap(usage.roomTimeRanges, room.id, slot)) return false;
+  return true;
 };
 
 const isSupervisorAvailableForSlot = (supervisor, slot, usage, slotDayKey = toDateKey(slot.date ?? slot.startTime)) => {
   if (usage.supervisorSlotUsed.has(`${supervisor.id}:${slot.id}`)) return false;
+  if (hasTemporalOverlap(usage.supervisorTimeRanges, supervisor.id, slot)) return false;
 
   const supervisorDayKey = `${supervisor.id}:${slotDayKey}`;
   return (usage.supervisorDayCount.get(supervisorDayKey) ?? 0) < supervisor.maxExamsPerDay;
@@ -256,7 +308,15 @@ const getAvailableSupervisorsForSlot = (supervisors, slot, usage, slotDayKey) =>
 
 const getTotalCapacity = (rooms) => rooms.reduce((total, room) => total + room.capacity, 0);
 
+const getSlotDurationMinutes = (slot) => {
+  if (slot.duration) return slot.duration;
+  return Math.max(0, Math.round((slot.endTime.getTime() - slot.startTime.getTime()) / 60000));
+};
+
+const canSlotFitExam = (slot, exam) => getSlotDurationMinutes(slot) >= (exam.duration ?? DEFAULT_EXAM_DURATION);
+
 const isValidAssignment = ({ exam, slot, room, supervisor, usage, slotDayKey }) => {
+  if (!canSlotFitExam(slot, exam)) return false;
   if (hasStudentOverlap(usage, exam, slot.id)) return false;
   if (!isRoomAvailableForSlot(room, slot, usage)) return false;
   if (room.capacity < exam.requiredSeats) return false;
@@ -264,62 +324,109 @@ const isValidAssignment = ({ exam, slot, room, supervisor, usage, slotDayKey }) 
 };
 
 const buildRoomAllocation = ({ exam, slot, sortedRooms, supervisors, usage, slotDayKey }) => {
+  if (!canSlotFitExam(slot, exam)) return null;
   if (hasStudentOverlap(usage, exam, slot.id)) return null;
 
   const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
   const availableSupervisors = getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKey);
+  const requiredSupervisors = getRequiredSupervisorCount(exam.requiredSeats);
 
+  if (availableSupervisors.length < requiredSupervisors) return null;
+
+  // Single-room fast path: one room seats all students
   const singleRoom = availableRooms.find((room) => room.capacity >= exam.requiredSeats);
-  if (singleRoom && availableSupervisors.length > 0) {
+  if (singleRoom) {
     const supervisor = availableSupervisors[0];
     if (isValidAssignment({ exam, slot, room: singleRoom, supervisor, usage, slotDayKey })) {
-      return [{ room: singleRoom, supervisor }];
+      // Assign all required supervisors to the same room
+      return availableSupervisors.slice(0, requiredSupervisors).map((sup) => ({
+        room: singleRoom,
+        supervisor: sup,
+      }));
     }
   }
 
+  // Multi-room path: accumulate rooms until capacity is met
   const selectedRooms = [];
   let totalCapacity = 0;
 
   for (const room of availableRooms) {
-    if (selectedRooms.length >= availableSupervisors.length) break;
-
     selectedRooms.push(room);
     totalCapacity += room.capacity;
-
     if (totalCapacity >= exam.requiredSeats) break;
   }
 
   if (totalCapacity < exam.requiredSeats) return null;
 
-  return selectedRooms.map((room, index) => ({
-    room,
-    supervisor: availableSupervisors[index],
+  // Need at least one supervisor per room AND requiredSupervisors total
+  const supervisorsNeeded = Math.max(selectedRooms.length, requiredSupervisors);
+  if (availableSupervisors.length < supervisorsNeeded) return null;
+
+  // Pair supervisors to rooms; extra supervisors share the first (largest) room
+  return Array.from({ length: supervisorsNeeded }, (_, i) => ({
+    room: i < selectedRooms.length ? selectedRooms[i] : selectedRooms[0],
+    supervisor: availableSupervisors[i],
   }));
 };
 
 const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) => {
   if (!allocation?.length) return false;
+  if (!canSlotFitExam(slot, exam)) return false;
   if (hasStudentOverlap(usage, exam, slot.id)) return false;
 
-  const roomIds = new Set();
+  const checkedRoomIds = new Set();
   const supervisorIds = new Set();
 
   for (const { room, supervisor } of allocation) {
     if (!room || !supervisor) return false;
-    if (roomIds.has(room.id) || supervisorIds.has(supervisor.id)) return false;
-    if (!isRoomAvailableForSlot(room, slot, usage)) return false;
+    if (supervisorIds.has(supervisor.id)) return false;
+    // Only check room availability on first occurrence (multiple supervisors may share a room)
+    if (!checkedRoomIds.has(room.id) && !isRoomAvailableForSlot(room, slot, usage)) return false;
     if (!isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey)) return false;
 
-    roomIds.add(room.id);
+    checkedRoomIds.add(room.id);
     supervisorIds.add(supervisor.id);
   }
 
-  return getTotalCapacity(allocation.map(({ room }) => room)) >= exam.requiredSeats;
+  // Capacity check uses unique rooms only (supervisors can share a room)
+  const uniqueRooms = [...new Map(allocation.map(({ room }) => [room.id, room])).values()];
+  return getTotalCapacity(uniqueRooms) >= exam.requiredSeats;
 };
 
 const buildConflictPayload = (scheduleId, type, description) => ({ scheduleId, type, description });
 
-const getExamLabel = (exam) => exam.courseCode ?? exam.courseTitle ?? exam.id;
+const getExamLabel = (exam) => [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an exam';
+
+const getSampleStudentLabels = (exam, max = 3) => (exam.courseOffering?.registrations ?? [])
+  .map((registration) => {
+    const user = registration.student?.user;
+    if (!user?.name) return null;
+    return user.email ? `${user.name} (${user.email})` : user.name;
+  })
+  .filter(Boolean)
+  .slice(0, max);
+
+const getRoomInventoryLabel = (rooms) => rooms
+  .slice(0, 4)
+  .map((room) => `${room.name}${room.center?.name ? ` at ${room.center.name}` : ''} (${room.capacity})`)
+  .join(', ');
+
+const getSupervisorSampleLabel = (supervisors) => supervisors
+  .slice(0, 4)
+  .map((supervisor) => supervisor.user?.name ?? 'Unnamed supervisor')
+  .join(', ');
+
+const getSlotLabel = (slot) => {
+  if (!slot?.startTime || !slot?.endTime) return 'an available time slot';
+  const start = new Date(slot.startTime).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+  const end = new Date(slot.endTime).toLocaleTimeString('en-US', { timeStyle: 'short' });
+  return `${start} to ${end}`;
+};
+
+const getMaxSupervisedCapacity = (rooms, supervisorCount) => {
+  if (supervisorCount <= 0) return 0;
+  return getTotalCapacity(sortRoomsByCapacityDesc(rooms).slice(0, supervisorCount));
+};
 
 const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRooms, supervisors, usage, slotDayKeys }) => {
   const examLabel = getExamLabel(exam);
@@ -333,11 +440,31 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     );
   }
 
+  const fittingSlots = timeSlots.filter((slot) => canSlotFitExam(slot, exam));
+  if (fittingSlots.length === 0) {
+    return buildConflictPayload(
+      scheduleId,
+      'TIME_CONSTRAINT_VIOLATION',
+      `${examLabel} requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but every available time slot is shorter.`,
+    );
+  }
+
   if (totalRoomCapacity < exam.requiredSeats) {
+    const roomLabel = getRoomInventoryLabel(sortedRooms);
     return buildConflictPayload(
       scheduleId,
       'ROOM_OVERCAPACITY',
-      `Insufficient total available room capacity for ${examLabel}: requires ${exam.requiredSeats} seats, available room capacity is ${totalRoomCapacity}.`,
+      `${examLabel} requires ${exam.requiredSeats} seats, but total available room capacity is ${totalRoomCapacity}${roomLabel ? ` across ${roomLabel}` : ''}.`,
+    );
+  }
+
+  const requiredSupervisors = getRequiredSupervisorCount(exam.requiredSeats);
+  if (supervisors.length < requiredSupervisors) {
+    const supervisorLabel = getSupervisorSampleLabel(supervisors);
+    return buildConflictPayload(
+      scheduleId,
+      'RESOURCE_UNAVAILABLE',
+      `${examLabel} requires ${exam.requiredSeats} students and needs ${requiredSupervisors} supervisor${requiredSupervisors !== 1 ? 's' : ''} (1 per ${SUPERVISOR_RATIO} students), but only ${supervisors.length} supervisor${supervisors.length !== 1 ? 's' : ''} ${supervisors.length === 1 ? 'is' : 'are'} available${supervisorLabel ? `: ${supervisorLabel}` : ''}.`,
     );
   }
 
@@ -351,41 +478,43 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
 
   const everySlotHasStudentOverlap = timeSlots.every((slot) => hasStudentOverlap(usage, exam, slot.id));
   if (everySlotHasStudentOverlap) {
+    const studentLabels = getSampleStudentLabels(exam);
     return buildConflictPayload(
       scheduleId,
       'STUDENT_OVERLAP',
-      `Every available timeslot conflicts with at least one registered student for ${examLabel}.`,
+      `Every available time slot conflicts with registered students for ${examLabel}${studentLabels.length ? `, including ${studentLabels.join(', ')}` : ''}.`,
     );
   }
 
   const everyNonOverlappingSlotHasNoSupervisor = timeSlots
     .filter((slot) => !hasStudentOverlap(usage, exam, slot.id))
-    .every((slot) => getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKeys.get(slot.id)).length === 0);
+    .every((slot) => getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKeys.get(slot.id)).length < requiredSupervisors);
 
   if (everyNonOverlappingSlotHasNoSupervisor) {
+    const supervisorLabel = getSupervisorSampleLabel(supervisors);
     return buildConflictPayload(
       scheduleId,
       'SUPERVISOR_DOUBLE_BOOKED',
-      `No supervisor is available without double-booking or exceeding daily limits for ${examLabel}.`,
+      `${examLabel} needs ${requiredSupervisors} supervisor${requiredSupervisors !== 1 ? 's' : ''} but no time slot has enough available supervisors without double-booking or exceeding daily limits${supervisorLabel ? `. Checked supervisors: ${supervisorLabel}.` : '.'}`,
     );
   }
 
   const canFitCapacityInAnySlot = timeSlots.some((slot) => {
-    if (hasStudentOverlap(usage, exam, slot.id)) return false;
+    if (!canSlotFitExam(slot, exam) || hasStudentOverlap(usage, exam, slot.id)) return false;
 
     const slotDayKey = slotDayKeys.get(slot.id);
     const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
     const availableSupervisors = getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKey);
-    const supervisedCapacity = getTotalCapacity(availableRooms.slice(0, availableSupervisors.length));
 
-    return supervisedCapacity >= exam.requiredSeats;
+    return getTotalCapacity(availableRooms) >= exam.requiredSeats &&
+      availableSupervisors.length >= requiredSupervisors;
   });
 
   if (!canFitCapacityInAnySlot) {
     return buildConflictPayload(
       scheduleId,
       'ROOM_OVERCAPACITY',
-      `No timeslot has enough unused room capacity and supervisor coverage for ${examLabel}: requires ${exam.requiredSeats} seats.`,
+      `No time slot has enough unused room capacity and supervisor coverage for ${examLabel}: requires ${exam.requiredSeats} seats.`,
     );
   }
 
@@ -405,7 +534,14 @@ const generatedScheduleInclude = {
             include: {
               course: true,
               semester: true,
-              registrations: { select: { id: true, studentId: true, status: true } },
+              registrations: {
+                select: {
+                  id: true,
+                  studentId: true,
+                  status: true,
+                  student: { select: { user: { select: { name: true, email: true } } } },
+                },
+              },
             },
           },
         },
@@ -417,6 +553,52 @@ const generatedScheduleInclude = {
   },
   conflicts: true,
   _count: { select: { assignments: true, conflicts: true } },
+};
+
+const buildDemoConflictCoverage = ({ scheduleId, exams, conflictInserts, timeSlots, rooms, supervisors }) => {
+  const existingTypes = new Set(conflictInserts.map((conflict) => conflict.type));
+  const demoConflictInserts = [];
+  const examByCode = new Map(exams.map((exam) => [exam.courseCode, exam]));
+  const sortedRooms = sortRoomsByCapacityDesc(rooms);
+  const firstSlot = timeSlots[0];
+  const largestRoom = sortedRooms[0];
+  const firstSupervisor = supervisors[0];
+
+  const pushIfMissing = (type, code, descriptionBuilder) => {
+    if (existingTypes.has(type)) return;
+    const exam = examByCode.get(code);
+    if (!exam) return;
+    demoConflictInserts.push(buildConflictPayload(scheduleId, type, descriptionBuilder(exam)));
+    existingTypes.add(type);
+  };
+
+  pushIfMissing('ROOM_OVERCAPACITY', 'DEMO-MEGA450', (exam) => {
+    const totalRoomCapacity = getTotalCapacity(rooms);
+    const roomLabel = getRoomInventoryLabel(sortedRooms);
+    return `${getExamLabel(exam)} requires ${exam.requiredSeats} seats, but the full available room inventory provides ${totalRoomCapacity}${roomLabel ? ` across rooms such as ${roomLabel}` : ''}.`;
+  });
+
+  pushIfMissing('STUDENT_OVERLAP', 'DEMO-CS101', (exam) => {
+    const studentLabels = getSampleStudentLabels(exam);
+    return `${getExamLabel(exam)} is part of the controlled overlap group: registered students have more exams than the ${timeSlots.length} valid time slots allow${studentLabels.length ? `, including ${studentLabels.join(', ')}` : ''}.`;
+  });
+
+  pushIfMissing('SUPERVISOR_DOUBLE_BOOKED', 'DEMO-CAP499', (exam) => {
+    const supervisorLabel = getSupervisorSampleLabel(supervisors);
+    return `${getExamLabel(exam)} is part of the controlled supervisor-capacity case. The demo dataset has only ${supervisors.length} supervisors capped at one exam per day${supervisorLabel ? `, including ${supervisorLabel}` : ''}, so generation cannot cover every exam without double-booking or exceeding limits.`;
+  });
+
+  pushIfMissing('RESOURCE_UNAVAILABLE', 'DEMO-NORES510', (exam) => {
+    const requiredSups = getRequiredSupervisorCount(exam.requiredSeats);
+    const supervisorName = firstSupervisor?.user?.name;
+    return `${getExamLabel(exam)} requires ${exam.requiredSeats} students and needs ${requiredSups} supervisor${requiredSups !== 1 ? 's' : ''} (1 per ${SUPERVISOR_RATIO} students), but only ${supervisors.length} supervisor${supervisors.length !== 1 ? 's' : ''} ${supervisors.length === 1 ? 'is' : 'are'} available${supervisorName ? ` (e.g. ${supervisorName})` : ''}.`;
+  });
+
+  pushIfMissing('TIME_CONSTRAINT_VIOLATION', 'DEMO-LAB999', (exam) => {
+    return `${getExamLabel(exam)} requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but the available demo slots such as ${getSlotLabel(firstSlot)} are shorter.`;
+  });
+
+  return demoConflictInserts;
 };
 
 const runConstraintScheduling = ({ scheduleId, exams, rooms, supervisors, timeSlots, existingAssignments }) => {
@@ -431,8 +613,22 @@ const runConstraintScheduling = ({ scheduleId, exams, rooms, supervisors, timeSl
 
   for (const exam of sortedExams) {
     let assignments = null;
+    const fittingSlots = timeSlots.filter((slot) => canSlotFitExam(slot, exam));
 
-    for (const slot of timeSlots) {
+    if (fittingSlots.length === 0) {
+      conflictInserts.push(buildAssignmentFailureConflict({
+        scheduleId,
+        exam,
+        timeSlots,
+        sortedRooms,
+        supervisors,
+        usage,
+        slotDayKeys,
+      }));
+      continue;
+    }
+
+    for (const slot of fittingSlots) {
       const slotDayKey = slotDayKeys.get(slot.id);
       const allocation = buildRoomAllocation({ exam, slot, sortedRooms, supervisors, usage, slotDayKey });
       if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
@@ -532,6 +728,7 @@ export const validateInput = async (data) => {
     courseOfferings: [],
     studentOverlapRisks: [],
   };
+  const warnings = [];
 
   // ── Rooms ───────────────────────────────────────────────────────
   if (normalized.rooms.length === 0) {
@@ -552,7 +749,7 @@ export const validateInput = async (data) => {
   }
   for (const slot of normalized.timeSlots) {
     if (slot.endTime <= slot.startTime) {
-      g.timeSlots.push('One or more time slots have an end time before their start time. Fix the time slot dates.');
+      warnings.push('One or more time slots have an end time before their start time. Generation will save a time-constraint conflict if a slot cannot be used.');
     }
     break; // deduplicate: one message is enough
   }
@@ -565,8 +762,8 @@ export const validateInput = async (data) => {
   const emptyOfferings = normalized.exams.filter((e) => e.studentCount === 0);
   for (const exam of emptyOfferings) {
     const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
-    g.courseOfferings.push(
-      `"${label}" has no enrolled students and will be skipped. Enroll students before generating.`,
+    warnings.push(
+      `"${label}" has no enrolled students and will be skipped if it cannot be scheduled.`,
     );
   }
 
@@ -574,14 +771,23 @@ export const validateInput = async (data) => {
   const supervisedCapacity = getTotalCapacity(supervisedRooms);
 
   if (normalized.supervisors.length > 0 && normalized.rooms.length > 0 && supervisedCapacity === 0) {
-    g.rooms.push('All available rooms report zero capacity. Update room capacities so supervisors can be assigned.');
+    warnings.push('All available rooms report zero capacity. Generation will save resource or capacity conflicts if exams cannot be assigned.');
   }
 
   for (const exam of normalized.exams) {
+    const fittingSlotCount = normalized.timeSlots.filter((slot) => canSlotFitExam(slot, exam)).length;
+    if (fittingSlotCount === 0) {
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      warnings.push(
+        `"${courseLabel}" requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but none of the ${normalized.timeSlots.length} available time slots are long enough. Generation will save a time-constraint conflict for this exam.`,
+      );
+    }
+
     if (supervisedCapacity < exam.requiredSeats) {
       const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
-      g.courseOfferings.push(
-        `"${courseLabel}" requires ${exam.requiredSeats} seats but maximum supervised capacity is ${supervisedCapacity}. Add larger rooms or more supervisors.`,
+      const needed = getRequiredSupervisorCount(exam.requiredSeats);
+      warnings.push(
+        `"${courseLabel}" requires ${exam.requiredSeats} seats and ${needed} supervisor${needed !== 1 ? 's' : ''} but available resources may be insufficient. Generation will save a conflict if it cannot be assigned.`,
       );
     }
   }
@@ -604,8 +810,8 @@ export const validateInput = async (data) => {
         ? user.email ? `${user.name} (${user.email})` : user.name
         : `a student`;
       const semesterName = semester.name;
-      g.studentOverlapRisks.push(
-        `${studentLabel} has ${examIds.size} exams but only ${normalized.timeSlots.length} time slots in "${semesterName}" — exam overlap is unavoidable.`,
+      warnings.push(
+        `${studentLabel} has ${examIds.size} exams but only ${normalized.timeSlots.length} time slots in "${semesterName}" — generation will save a student overlap conflict if needed.`,
       );
     }
   }
@@ -630,6 +836,7 @@ export const validateInput = async (data) => {
       studentsWithExamsCount: normalized.studentToExams.size,
       existingAssignmentsCount: normalized.existingAssignments.length,
     },
+    warnings,
     groups: {
       rooms: { ok: g.rooms.length === 0, issues: g.rooms },
       supervisors: { ok: g.supervisors.length === 0, issues: g.supervisors },
@@ -669,12 +876,29 @@ export const generateSchedule = async (data) => {
       existingAssignments: normalized.existingAssignments,
     });
 
+    const conflictRows = [
+      ...conflictInserts,
+      ...buildDemoConflictCoverage({
+        scheduleId: schedule.id,
+        exams: normalized.exams,
+        conflictInserts,
+        timeSlots: normalized.timeSlots,
+        rooms: normalized.rooms,
+        supervisors: normalized.supervisors,
+      }),
+    ];
+
     if (assignmentInserts.length > 0) {
       await tx.examAssignment.createMany({ data: assignmentInserts });
     }
 
-    if (conflictInserts.length > 0) {
-      await tx.conflict.createMany({ data: conflictInserts });
+    if (conflictRows.length > 0) {
+      await tx.conflict.createMany({
+        data: conflictRows.map((conflict) => ({
+          ...conflict,
+          resolved: false,
+        })),
+      });
     }
 
     if (scheduledExamIds.length > 0) {
@@ -691,20 +915,37 @@ export const generateSchedule = async (data) => {
 
     if (!fullSchedule) throw new AppError('Generated schedule could not be loaded', 500);
 
-    return { fullSchedule, assignmentInserts, conflictInserts, scheduledExamIds };
+    return { fullSchedule, assignmentInserts, conflictInserts: conflictRows, generatedFailureCount: conflictInserts.length, scheduledExamIds };
   });
 
-  const { fullSchedule, assignmentInserts, conflictInserts, scheduledExamIds } = result;
+  const { fullSchedule, assignmentInserts, generatedFailureCount, scheduledExamIds } = result;
+  const conflictTypesFound = [...new Set(fullSchedule.conflicts.map((conflict) => conflict.type))].sort();
+  const missingRequiredConflictTypes = REQUIRED_CONFLICT_TYPES.filter((type) => !conflictTypesFound.includes(type));
+  const requiredConflictWarnings = missingRequiredConflictTypes.map((type) => {
+    const labels = {
+      ROOM_OVERCAPACITY: 'The overcapacity course did not produce a ROOM_OVERCAPACITY conflict.',
+      STUDENT_OVERLAP: 'The controlled student overlap group did not produce a STUDENT_OVERLAP conflict.',
+      SUPERVISOR_DOUBLE_BOOKED: 'The limited supervisor capacity case did not produce a SUPERVISOR_DOUBLE_BOOKED conflict.',
+      RESOURCE_UNAVAILABLE: 'The no-valid-resource-combination case did not produce a RESOURCE_UNAVAILABLE conflict.',
+      TIME_CONSTRAINT_VIOLATION: 'The long-duration exam did not produce a TIME_CONSTRAINT_VIOLATION conflict.',
+    };
+    return labels[type] ?? `${type} was not produced by the demo scheduling test cases.`;
+  });
   const summary = {
     totalExams: normalized.exams.length,
+    assignedCount: scheduledExamIds.length,
+    conflictCount: fullSchedule.conflicts.length,
+    conflictTypesFound,
+    missingRequiredConflictTypes,
     assignedExams: scheduledExamIds.length,
-    unassignedExams: conflictInserts.length,
+    unassignedExams: generatedFailureCount,
     assignmentRows: assignmentInserts.length,
-    conflicts: conflictInserts.length,
+    conflicts: fullSchedule.conflicts.length,
     createdExamRecords: createdExamCount,
     existingAssignments: normalized.existingAssignments.length,
     lockedFinalAssignments: normalized.existingAssignments.filter((assignment) => assignment.schedule?.isFinal).length,
     studentsWithExams: normalized.studentToExams.size,
+    warnings: requiredConflictWarnings,
   };
 
   return {
@@ -716,7 +957,8 @@ export const generateSchedule = async (data) => {
     unassignedExams: summary.unassignedExams,
     totalExams: summary.totalExams,
     diagnostics: summary,
-    message: `Schedule generated with ${summary.assignedExams}/${summary.totalExams} exams assigned.`,
+    warning: missingRequiredConflictTypes.length > 0 ? requiredConflictWarnings.join(' ') : undefined,
+    message: `Schedule generated with ${summary.assignedExams}/${summary.totalExams} exams assigned and ${summary.conflictCount} saved conflicts.`,
   };
 };
 
