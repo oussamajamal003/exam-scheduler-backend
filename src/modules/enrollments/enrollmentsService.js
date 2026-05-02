@@ -105,7 +105,31 @@ export const getByOffering = async (offeringId, query = {}, user) => {
   return await getAll({ ...query, courseOfferingId: offeringId }, user);
 };
 
+// -------------------- capacity guard --------------------
+const assertOfferingCapacity = async (courseOfferingId, tx = prisma) => {
+  const offering = await tx.courseOffering.findUnique({
+    where: { id: courseOfferingId },
+    select: {
+      capacity: true,
+      course: { select: { code: true, title: true } },
+      _count: { select: { registrations: true } },
+    },
+  });
+  if (!offering) throw new AppError('Course offering not found.', 404);
+  if (offering.capacity != null && offering.capacity > 0) {
+    const enrolled = offering._count.registrations;
+    if (enrolled >= offering.capacity) {
+      const label = offering.course?.code ?? offering.course?.title ?? 'This course offering';
+      throw new AppError(
+        `"${label}" is full. Capacity: ${offering.capacity}, currently enrolled: ${enrolled}.`,
+        409,
+      );
+    }
+  }
+};
+
 export const create = async (data) => {
+  await assertOfferingCapacity(data.courseOfferingId);
   const enrollment = await prisma.registration.create({
     data,
     include: buildEnrollmentInclude,
@@ -116,8 +140,41 @@ export const create = async (data) => {
 export const bulkImport = async (items = []) => {
   return await prisma.$transaction(async (tx) => {
     const created = [];
+    // Track per-offering count added in this batch (on top of existing registrations)
+    const batchCounters = new Map();
 
     for (const item of items) {
+      // Fetch offering capacity once per offering per transaction
+      const offeringId = item.courseOfferingId;
+      if (!batchCounters.has(offeringId)) {
+        const offering = await tx.courseOffering.findUnique({
+          where: { id: offeringId },
+          select: {
+            capacity: true,
+            course: { select: { code: true, title: true } },
+            _count: { select: { registrations: true } },
+          },
+        });
+        if (!offering) throw new AppError(`Course offering ${offeringId} not found.`, 404);
+        batchCounters.set(offeringId, {
+          capacity: offering.capacity,
+          label: offering.course?.code ?? offering.course?.title ?? 'offering',
+          current: offering._count.registrations,
+          added: 0,
+        });
+      }
+      const counter = batchCounters.get(offeringId);
+      if (counter.capacity != null && counter.capacity > 0) {
+        const projected = counter.current + counter.added;
+        if (projected >= counter.capacity) {
+          throw new AppError(
+            `"${counter.label}" is full. Capacity: ${counter.capacity}, enrolled: ${projected}. No additional students can be enrolled.`,
+            409,
+          );
+        }
+      }
+      counter.added += 1;
+
       const enrollment = await tx.registration.create({
         data: item,
         include: buildEnrollmentInclude,

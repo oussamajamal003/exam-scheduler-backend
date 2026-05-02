@@ -32,7 +32,12 @@ const loadScheduleForDetection = async (scheduleId) => {
                 include: {
                   course: true,
                   semester: true,
-                  registrations: { select: { studentId: true } },
+                  registrations: {
+                  select: {
+                    studentId: true,
+                    student: { select: { user: { select: { name: true, email: true } } } },
+                  },
+                },
                 },
               },
             },
@@ -49,11 +54,45 @@ const loadScheduleForDetection = async (scheduleId) => {
   return schedule;
 };
 
+// -------------------- label helpers --------------------
+const getExamCourseLabel = (assignment) => {
+  const course = assignment.exam?.courseOffering?.course;
+  return course?.code ?? course?.title ?? null;
+};
+
+const getSlotLabel = (assignment) => {
+  const slot = assignment.timeSlot;
+  if (!slot?.startTime) return 'an unknown time slot';
+  return new Date(slot.startTime).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+};
+
+const getRoomLabel = (assignment) => assignment.room?.name ?? null;
+
+const getSupervisorLabel = (assignment) =>
+  assignment.supervisor?.user?.name ?? null;
+
 // Compute conflicts using ConflictType enum values from the Prisma schema:
 // STUDENT_OVERLAP | SUPERVISOR_DOUBLE_BOOKED | ROOM_OVERCAPACITY |
 // RESOURCE_UNAVAILABLE | TIME_CONSTRAINT_VIOLATION
 const computeConflicts = (schedule) => {
   const conflicts = [];
+
+  // Build a student info map from all registrations across assignments
+  const studentInfoMap = new Map(); // studentId → { name, email }
+  for (const assignment of schedule.assignments) {
+    const regs = assignment.exam?.courseOffering?.registrations ?? [];
+    for (const reg of regs) {
+      if (!studentInfoMap.has(reg.studentId) && reg.student?.user) {
+        studentInfoMap.set(reg.studentId, reg.student.user);
+      }
+    }
+  }
+
+  const getStudentLabel = (studentId) => {
+    const user = studentInfoMap.get(studentId);
+    if (!user?.name) return null;
+    return user.email ? `${user.name} (${user.email})` : user.name;
+  };
 
   // 1) STUDENT_OVERLAP — same student in multiple exams in same timeslot
   const studentSlotMap = new Map();
@@ -68,10 +107,15 @@ const computeConflicts = (schedule) => {
   for (const [key, assignments] of studentSlotMap.entries()) {
     const distinctExams = new Set(assignments.map((a) => a.examId));
     if (distinctExams.size < 2) continue;
-    const [studentId, timeSlotId] = key.split(':');
+    const [studentId] = key.split(':');
+    const studentLabel = getStudentLabel(studentId) ?? `Student \u2026${studentId.slice(-8)}`;
+    const slotLabel = getSlotLabel(assignments[0]);
+    const examLabels = [...new Set(assignments.map((a) => getExamCourseLabel(a)).filter(Boolean))].join(', ');
     conflicts.push({
       type: 'STUDENT_OVERLAP',
-      description: `Student ${studentId} has ${distinctExams.size} exams scheduled in timeslot ${timeSlotId}.`,
+      description: examLabels
+        ? `${studentLabel} has ${distinctExams.size} exams scheduled at the same time (${slotLabel}): ${examLabels}.`
+        : `${studentLabel} has ${distinctExams.size} exams scheduled at the same time (${slotLabel}).`,
     });
   }
 
@@ -82,13 +126,14 @@ const computeConflicts = (schedule) => {
     if (!roomSlotMap.has(key)) roomSlotMap.set(key, []);
     roomSlotMap.get(key).push(assignment);
   }
-  for (const [key, assignments] of roomSlotMap.entries()) {
+  for (const [, assignments] of roomSlotMap.entries()) {
     const distinctExams = new Set(assignments.map((a) => a.examId));
     if (distinctExams.size < 2) continue;
-    const [roomId, timeSlotId] = key.split(':');
+    const roomLabel = getRoomLabel(assignments[0]) ?? 'A room';
+    const slotLabel = getSlotLabel(assignments[0]);
     conflicts.push({
       type: 'RESOURCE_UNAVAILABLE',
-      description: `Room ${roomId} is assigned to ${distinctExams.size} distinct exams in timeslot ${timeSlotId}.`,
+      description: `Room "${roomLabel}" is double-booked — assigned to ${distinctExams.size} different exams at ${slotLabel}.`,
     });
   }
 
@@ -100,14 +145,15 @@ const computeConflicts = (schedule) => {
     if (!examSlotRoomMap.has(key)) examSlotRoomMap.set(key, []);
     examSlotRoomMap.get(key).push(assignment);
   }
-  for (const [key, assignments] of examSlotRoomMap.entries()) {
+  for (const [, assignments] of examSlotRoomMap.entries()) {
     const totalCapacity = assignments.reduce((sum, a) => sum + (a.room?.capacity ?? 0), 0);
     const neededSeats = getRequiredSeats(assignments[0]);
     if (totalCapacity < neededSeats) {
-      const [examId, timeSlotId] = key.split(':');
+      const examLabel = getExamCourseLabel(assignments[0]) ?? 'An exam';
+      const slotLabel = getSlotLabel(assignments[0]);
       conflicts.push({
         type: 'ROOM_OVERCAPACITY',
-        description: `Exam ${examId} in timeslot ${timeSlotId} requires ${neededSeats} seats but allocated rooms provide ${totalCapacity}.`,
+        description: `"${examLabel}" requires ${neededSeats} seats at ${slotLabel}, but the allocated room(s) only provide ${totalCapacity}.`,
       });
     }
   }
@@ -119,22 +165,25 @@ const computeConflicts = (schedule) => {
     if (!supervisorSlotMap.has(key)) supervisorSlotMap.set(key, []);
     supervisorSlotMap.get(key).push(assignment);
   }
-  for (const [key, assignments] of supervisorSlotMap.entries()) {
+  for (const [, assignments] of supervisorSlotMap.entries()) {
     const distinctExams = new Set(assignments.map((a) => a.examId));
     if (distinctExams.size < 2) continue;
-    const [supervisorId, timeSlotId] = key.split(':');
+    const supervisorLabel = getSupervisorLabel(assignments[0]) ?? 'A supervisor';
+    const slotLabel = getSlotLabel(assignments[0]);
     conflicts.push({
       type: 'SUPERVISOR_DOUBLE_BOOKED',
-      description: `Supervisor ${supervisorId} is assigned to ${distinctExams.size} distinct exams in timeslot ${timeSlotId}.`,
+      description: `Supervisor "${supervisorLabel}" is double-booked — assigned to ${distinctExams.size} different exams at ${slotLabel}.`,
     });
   }
 
   // 5) RESOURCE_UNAVAILABLE — room marked non-AVAILABLE
   for (const assignment of schedule.assignments) {
     if (assignment.room?.status && assignment.room.status !== 'AVAILABLE') {
+      const roomLabel = getRoomLabel(assignment) ?? assignment.roomId;
+      const examLabel = getExamCourseLabel(assignment) ?? 'an exam';
       conflicts.push({
         type: 'RESOURCE_UNAVAILABLE',
-        description: `Room ${assignment.roomId} (status=${assignment.room.status}) is assigned to exam ${assignment.examId}.`,
+        description: `Room "${roomLabel}" is unavailable (status: ${assignment.room.status}) but is assigned to ${examLabel}.`,
       });
     }
   }

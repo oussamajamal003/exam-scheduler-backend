@@ -79,7 +79,14 @@ export const create = async (data, user) => {
 };
 
 export const update = async (id, data) => {
-  await getById(id);
+  const existing = await getById(id);
+
+  if (existing.isFinal && data.name !== undefined) {
+    throw new AppError(
+      'Published schedules cannot be renamed. Return to draft first.',
+      403
+    );
+  }
 
   return prisma.schedule.update({
     where: { id },
@@ -92,6 +99,24 @@ export const update = async (id, data) => {
 };
 
 export const remove = async (id) => {
-  await getById(id);
+  const existing = await getById(id);
+  if (existing.isFinal) {
+    throw new AppError(
+      'Published schedules cannot be deleted. Return to draft first.',
+      403
+    );
+  }
   return prisma.schedule.delete({ where: { id } });
+};
+
+export const unpublish = async (id) => {
+  const existing = await getById(id);
+  if (!existing.isFinal) {
+    throw new AppError('Schedule is already in draft.', 400);
+  }
+  return prisma.schedule.update({
+    where: { id },
+    data: { isFinal: false },
+    include: scheduleInclude,
+  });
 };

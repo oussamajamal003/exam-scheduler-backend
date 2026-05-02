@@ -518,42 +518,110 @@ export const prepareScheduling = async (data) => {
   };
 };
 
-export const validateInput = async (data) => {
-  const { normalized } = await fetchSchedulingData(data.semesterId);
-  const issues = [];
+const fmtDate = (d) =>
+  new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
-  if (normalized.rooms.length === 0) issues.push('No available rooms found.');
-  if (normalized.supervisors.length === 0) issues.push('No supervisors available.');
-  if (normalized.timeSlots.length === 0) issues.push('No time slots found inside the semester range.');
-  if (normalized.exams.length === 0) issues.push('No active course offerings found for this semester.');
+export const validateInput = async (data) => {
+  const { normalized, semester } = await fetchSchedulingData(data.semesterId);
+
+  // ── Group buckets ────────────────────────────────────────────────
+  const g = {
+    rooms: [],
+    supervisors: [],
+    timeSlots: [],
+    courseOfferings: [],
+    studentOverlapRisks: [],
+  };
+
+  // ── Rooms ───────────────────────────────────────────────────────
+  if (normalized.rooms.length === 0) {
+    g.rooms.push('No rooms are marked as Available. Mark at least one room as Available before generating.');
+  }
+
+  // ── Supervisors ─────────────────────────────────────────────────
+  if (normalized.supervisors.length === 0) {
+    g.supervisors.push('No supervisors are registered. Add at least one supervisor before generating.');
+  }
+
+  // ── Time slots ──────────────────────────────────────────────────
+  if (normalized.timeSlots.length === 0) {
+    const semRange = `${fmtDate(semester.startDate)} – ${fmtDate(semester.endDate)}`;
+    g.timeSlots.push(
+      `No time slots fall within the "${semester.name}" period (${semRange}). Create time slots with dates inside this range.`,
+    );
+  }
+  for (const slot of normalized.timeSlots) {
+    if (slot.endTime <= slot.startTime) {
+      g.timeSlots.push('One or more time slots have an end time before their start time. Fix the time slot dates.');
+    }
+    break; // deduplicate: one message is enough
+  }
+
+  // ── Course offerings ─────────────────────────────────────────────
+  if (normalized.exams.length === 0) {
+    g.courseOfferings.push(`No active course offerings found for "${semester.name}". Activate or add offerings for this semester.`);
+  }
+
+  const emptyOfferings = normalized.exams.filter((e) => e.studentCount === 0);
+  for (const exam of emptyOfferings) {
+    const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+    g.courseOfferings.push(
+      `"${label}" has no enrolled students and will be skipped. Enroll students before generating.`,
+    );
+  }
 
   const supervisedRooms = sortRoomsByCapacityDesc(normalized.rooms).slice(0, normalized.supervisors.length);
   const supervisedCapacity = getTotalCapacity(supervisedRooms);
 
+  if (normalized.supervisors.length > 0 && normalized.rooms.length > 0 && supervisedCapacity === 0) {
+    g.rooms.push('All available rooms report zero capacity. Update room capacities so supervisors can be assigned.');
+  }
+
   for (const exam of normalized.exams) {
     if (supervisedCapacity < exam.requiredSeats) {
-      issues.push(
-        `Available room/supervisor capacity cannot host ${exam.courseCode ?? exam.id} (required seats: ${exam.requiredSeats}, supervised seats: ${supervisedCapacity}).`,
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      g.courseOfferings.push(
+        `"${courseLabel}" requires ${exam.requiredSeats} seats but maximum supervised capacity is ${supervisedCapacity}. Add larger rooms or more supervisors.`,
       );
     }
+  }
+
+  // ── Student overlap risks ────────────────────────────────────────
+  const allStudentIds = [...normalized.studentToExams.keys()];
+  const studentUserMap = new Map();
+  if (allStudentIds.length > 0) {
+    const students = await prisma.student.findMany({
+      where: { id: { in: allStudentIds } },
+      select: { id: true, user: { select: { name: true, email: true } } },
+    });
+    for (const s of students) studentUserMap.set(s.id, s.user);
   }
 
   for (const [studentId, examIds] of normalized.studentToExams.entries()) {
     if (examIds.size > normalized.timeSlots.length && normalized.timeSlots.length > 0) {
-      issues.push(
-        `Student ${studentId} has ${examIds.size} exams but only ${normalized.timeSlots.length} available slots (overlap risk is unavoidable).`,
+      const user = studentUserMap.get(studentId);
+      const studentLabel = user?.name
+        ? user.email ? `${user.name} (${user.email})` : user.name
+        : `a student`;
+      const semesterName = semester.name;
+      g.studentOverlapRisks.push(
+        `${studentLabel} has ${examIds.size} exams but only ${normalized.timeSlots.length} time slots in "${semesterName}" — exam overlap is unavoidable.`,
       );
     }
   }
 
-  for (const slot of normalized.timeSlots) {
-    if (slot.endTime <= slot.startTime) {
-      issues.push(`Invalid timeslot ${slot.id}: endTime must be after startTime.`);
-    }
-  }
+  // ── Flatten for backward compat ──────────────────────────────────
+  const allIssues = [
+    ...g.rooms,
+    ...g.supervisors,
+    ...g.timeSlots,
+    ...g.courseOfferings,
+    ...g.studentOverlapRisks,
+  ];
 
   return {
-    ready: issues.length === 0,
+    ready: allIssues.length === 0,
+    semester: { name: semester.name },
     metrics: {
       roomsCount: normalized.rooms.length,
       supervisorsCount: normalized.supervisors.length,
@@ -562,7 +630,15 @@ export const validateInput = async (data) => {
       studentsWithExamsCount: normalized.studentToExams.size,
       existingAssignmentsCount: normalized.existingAssignments.length,
     },
-    issues,
+    groups: {
+      rooms: { ok: g.rooms.length === 0, issues: g.rooms },
+      supervisors: { ok: g.supervisors.length === 0, issues: g.supervisors },
+      timeSlots: { ok: g.timeSlots.length === 0, issues: g.timeSlots },
+      courseOfferings: { ok: g.courseOfferings.length === 0, issues: g.courseOfferings },
+      studentOverlapRisks: { ok: g.studentOverlapRisks.length === 0, issues: g.studentOverlapRisks },
+    },
+    // flat list kept for backward compat
+    issues: allIssues,
   };
 };
 

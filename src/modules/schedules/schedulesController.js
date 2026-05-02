@@ -26,3 +26,8 @@ export const remove = catchAsync(async (req, res) => {
   await service.remove(req.params.id);
   sendResponse(res, 200, 'Schedule deleted successfully');
 });
+
+export const unpublish = catchAsync(async (req, res) => {
+  const result = await service.unpublish(req.params.id);
+  sendResponse(res, 200, 'Schedule returned to draft', result);
+});

@@ -257,7 +257,10 @@ export const getOne = async (scheduleId, assignmentId) => {
 export const update = async (scheduleId, assignmentId, payload) => {
   const schedule = await ensureScheduleExists(scheduleId);
   if (schedule.isFinal) {
-    throw new AppError('Cannot modify assignments of a finalized schedule', 409);
+    throw new AppError(
+      'Published schedules cannot be modified. Return to draft first.',
+      403
+    );
   }
   const existing = await loadAssignmentInSchedule(scheduleId, assignmentId);
 
@@ -331,7 +334,10 @@ export const update = async (scheduleId, assignmentId, payload) => {
 export const remove = async (scheduleId, assignmentId) => {
   const schedule = await ensureScheduleExists(scheduleId);
   if (schedule.isFinal) {
-    throw new AppError('Cannot delete assignments of a finalized schedule', 409);
+    throw new AppError(
+      'Published schedules cannot be modified. Return to draft first.',
+      403
+    );
   }
   await loadAssignmentInSchedule(scheduleId, assignmentId);
 

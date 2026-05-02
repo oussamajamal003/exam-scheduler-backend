@@ -23,6 +23,7 @@ router.post('/', validate(createScheduleSchema), controller.create);
 router.get('/:id', validate(getScheduleSchema), controller.getById);
 router.put('/:id', validate(updateScheduleSchema), controller.update);
 router.delete('/:id', validate(getScheduleSchema), controller.remove);
+router.patch('/:id/unpublish', validate(getScheduleSchema), controller.unpublish);
 
 // GET /api/schedules/:id/conflicts
 router.get(
