@@ -58,8 +58,25 @@ const buildStudentExamMap = (exams) => {
   return studentToExams;
 };
 
+const getSharedStudentConflictCount = (exam, allExams) => {
+  if (!exam.studentIds?.length) return 0;
+
+  const studentIds = new Set(exam.studentIds);
+  let conflictCount = 0;
+
+  for (const otherExam of allExams) {
+    if (otherExam.id === exam.id) continue;
+    if (otherExam.studentIds?.some((studentId) => studentIds.has(studentId))) {
+      conflictCount += 1;
+    }
+  }
+
+  return conflictCount;
+};
+
 const compareExamsForScheduling = (a, b) => (
   b.studentCount - a.studentCount
+  || b.conflictCount - a.conflictCount
   || b.priority - a.priority
   || b.difficulty - a.difficulty
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
@@ -92,8 +109,13 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, supervisors, timeSlot
     };
   });
 
+  const examsWithConflictCounts = exams.map((exam) => ({
+    ...exam,
+    conflictCount: getSharedStudentConflictCount(exam, exams),
+  }));
+
   return {
-    exams,
+    exams: examsWithConflictCounts,
     rooms: rooms.map((room) => ({
       id: room.id,
       name: room.name,
@@ -306,6 +328,10 @@ const getAvailableSupervisorsForSlot = (supervisors, slot, usage, slotDayKey) =>
   return supervisors.filter((supervisor) => isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey));
 };
 
+const getSupervisorsForRoom = (supervisors, room) => {
+  return supervisors.filter((supervisor) => supervisor.centerId === room.centerId);
+};
+
 const getTotalCapacity = (rooms) => rooms.reduce((total, room) => total + room.capacity, 0);
 
 const getSlotDurationMinutes = (slot) => {
@@ -318,6 +344,7 @@ const canSlotFitExam = (slot, exam) => getSlotDurationMinutes(slot) >= (exam.dur
 const isValidAssignment = ({ exam, slot, room, supervisor, usage, slotDayKey }) => {
   if (!canSlotFitExam(slot, exam)) return false;
   if (hasStudentOverlap(usage, exam, slot.id)) return false;
+  if (room.centerId !== supervisor.centerId) return false;
   if (!isRoomAvailableForSlot(room, slot, usage)) return false;
   if (room.capacity < exam.requiredSeats) return false;
   return isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey);
@@ -333,25 +360,37 @@ const buildRoomAllocation = ({ exam, slot, sortedRooms, supervisors, usage, slot
 
   if (availableSupervisors.length < requiredSupervisors) return null;
 
-  // Single-room fast path: one room seats all students
-  const singleRoom = availableRooms.find((room) => room.capacity >= exam.requiredSeats);
+  // Single-room fast path: one room seats all students and all supervisors come from that room's center.
+  const singleRoom = availableRooms.find((room) => {
+    if (room.capacity < exam.requiredSeats) return false;
+    return getSupervisorsForRoom(availableSupervisors, room).length >= requiredSupervisors;
+  });
   if (singleRoom) {
-    const supervisor = availableSupervisors[0];
+    const roomSupervisors = getSupervisorsForRoom(availableSupervisors, singleRoom);
+    const supervisor = roomSupervisors[0];
     if (isValidAssignment({ exam, slot, room: singleRoom, supervisor, usage, slotDayKey })) {
       // Assign all required supervisors to the same room
-      return availableSupervisors.slice(0, requiredSupervisors).map((sup) => ({
+      return roomSupervisors.slice(0, requiredSupervisors).map((sup) => ({
         room: singleRoom,
         supervisor: sup,
       }));
     }
   }
 
-  // Multi-room path: accumulate rooms until capacity is met
+  // Multi-room path: accumulate rooms with center-matched supervisors until capacity is met.
   const selectedRooms = [];
+  const allocation = [];
+  const usedSupervisorIds = new Set();
   let totalCapacity = 0;
 
   for (const room of availableRooms) {
+    const supervisor = getSupervisorsForRoom(availableSupervisors, room)
+      .find((candidate) => !usedSupervisorIds.has(candidate.id));
+    if (!supervisor) continue;
+
     selectedRooms.push(room);
+    allocation.push({ room, supervisor });
+    usedSupervisorIds.add(supervisor.id);
     totalCapacity += room.capacity;
     if (totalCapacity >= exam.requiredSeats) break;
   }
@@ -360,13 +399,21 @@ const buildRoomAllocation = ({ exam, slot, sortedRooms, supervisors, usage, slot
 
   // Need at least one supervisor per room AND requiredSupervisors total
   const supervisorsNeeded = Math.max(selectedRooms.length, requiredSupervisors);
-  if (availableSupervisors.length < supervisorsNeeded) return null;
+  if (allocation.length < selectedRooms.length) return null;
 
-  // Pair supervisors to rooms; extra supervisors share the first (largest) room
-  return Array.from({ length: supervisorsNeeded }, (_, i) => ({
-    room: i < selectedRooms.length ? selectedRooms[i] : selectedRooms[0],
-    supervisor: availableSupervisors[i],
-  }));
+  for (const room of selectedRooms) {
+    if (allocation.length >= supervisorsNeeded) break;
+    const extraSupervisor = getSupervisorsForRoom(availableSupervisors, room)
+      .find((candidate) => !usedSupervisorIds.has(candidate.id));
+    if (!extraSupervisor) continue;
+
+    allocation.push({ room, supervisor: extraSupervisor });
+    usedSupervisorIds.add(extraSupervisor.id);
+  }
+
+  if (allocation.length < supervisorsNeeded) return null;
+
+  return allocation;
 };
 
 const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) => {
@@ -380,6 +427,7 @@ const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) =>
   for (const { room, supervisor } of allocation) {
     if (!room || !supervisor) return false;
     if (supervisorIds.has(supervisor.id)) return false;
+    if (room.centerId !== supervisor.centerId) return false;
     // Only check room availability on first occurrence (multiple supervisors may share a room)
     if (!checkedRoomIds.has(room.id) && !isRoomAvailableForSlot(room, slot, usage)) return false;
     if (!isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey)) return false;
@@ -996,10 +1044,18 @@ export const getScheduleAnalysis = async (scheduleId) => {
   const supervisorCollisions = [];
   const studentOverlaps = [];
   const roomSlotCount = new Map();
-  const supervisorSlotCount = new Map();
-  const supervisorDayCount = new Map();
+  const supervisorSlotExamIds = new Map();
+  const supervisorDayExamIds = new Map();
   const supervisorDailyLoadViolations = [];
   const examSlotCapacity = new Map();
+
+  // Build a map of supervisors for quick lookup
+  const supervisorMap = new Map();
+  for (const assignment of schedule.assignments) {
+    if (!supervisorMap.has(assignment.supervisorId)) {
+      supervisorMap.set(assignment.supervisorId, assignment.supervisor);
+    }
+  }
 
   for (const assignment of schedule.assignments) {
     const examSlotKey = `${assignment.examId}:${assignment.timeSlotId}`;
@@ -1007,21 +1063,31 @@ export const getScheduleAnalysis = async (scheduleId) => {
       examId: assignment.examId,
       timeSlotId: assignment.timeSlotId,
       assignmentIds: [],
+      roomIds: new Set(),
       requiredSeats: getRequiredSeatsForExam(assignment.exam),
       totalCapacity: 0,
     };
     capacityGroup.assignmentIds.push(assignment.id);
-    capacityGroup.totalCapacity += assignment.room.capacity;
+    if (!capacityGroup.roomIds.has(assignment.roomId) && assignment.room) {
+      capacityGroup.roomIds.add(assignment.roomId);
+      capacityGroup.totalCapacity += assignment.room.capacity ?? 0;
+    }
     examSlotCapacity.set(examSlotKey, capacityGroup);
 
     const roomSlotKey = `${assignment.roomId}:${assignment.timeSlotId}`;
-    roomSlotCount.set(roomSlotKey, (roomSlotCount.get(roomSlotKey) ?? 0) + 1);
+    const roomSlotGroup = roomSlotCount.get(roomSlotKey) ?? new Set();
+    roomSlotGroup.add(assignment.examId);
+    roomSlotCount.set(roomSlotKey, roomSlotGroup);
 
     const supervisorSlotKey = `${assignment.supervisorId}:${assignment.timeSlotId}`;
-    supervisorSlotCount.set(supervisorSlotKey, (supervisorSlotCount.get(supervisorSlotKey) ?? 0) + 1);
+    const supervisorSlotGroup = supervisorSlotExamIds.get(supervisorSlotKey) ?? new Set();
+    supervisorSlotGroup.add(assignment.examId);
+    supervisorSlotExamIds.set(supervisorSlotKey, supervisorSlotGroup);
 
     const supervisorDayKey = `${assignment.supervisorId}:${toDateKey(assignment.timeSlot.date ?? assignment.timeSlot.startTime)}`;
-    supervisorDayCount.set(supervisorDayKey, (supervisorDayCount.get(supervisorDayKey) ?? 0) + 1);
+    const supervisorDayGroup = supervisorDayExamIds.get(supervisorDayKey) ?? new Set();
+    supervisorDayGroup.add(assignment.examId);
+    supervisorDayExamIds.set(supervisorDayKey, supervisorDayGroup);
 
     const studentIds = getUniqueStudentIdsForExam(assignment.exam);
     for (const studentId of studentIds) {
@@ -1039,32 +1105,41 @@ export const getScheduleAnalysis = async (scheduleId) => {
     }
   }
 
-  for (const [key, count] of roomSlotCount.entries()) {
-    if (count > 1) {
+  for (const [key, examIds] of roomSlotCount.entries()) {
+    if (examIds.size > 1) {
       const [roomId, timeSlotId] = key.split(':');
-      roomReuseViolations.push({ roomId, timeSlotId, count });
+      roomReuseViolations.push({ roomId, timeSlotId, count: examIds.size, examIds: [...examIds] });
     }
   }
 
   for (const group of examSlotCapacity.values()) {
     if (group.totalCapacity < group.requiredSeats) {
-      roomCapacityViolations.push(group);
+      roomCapacityViolations.push({
+        ...group,
+        roomIds: [...group.roomIds],
+      });
     }
   }
 
-  for (const [key, count] of supervisorSlotCount.entries()) {
-    if (count > 1) {
+  for (const [key, examIds] of supervisorSlotExamIds.entries()) {
+    if (examIds.size > 1) {
       const [supervisorId, timeSlotId] = key.split(':');
-      supervisorCollisions.push({ supervisorId, timeSlotId, count });
+      supervisorCollisions.push({ supervisorId, timeSlotId, count: examIds.size, examIds: [...examIds] });
     }
   }
 
-  for (const [key, count] of supervisorDayCount.entries()) {
+  for (const [key, examIds] of supervisorDayExamIds.entries()) {
     const [supervisorId, date] = key.split(':');
-    const supervisor = schedule.assignments.find((assignment) => assignment.supervisorId === supervisorId)?.supervisor;
+    const supervisor = supervisorMap.get(supervisorId);
     const maxExamsPerDay = supervisor?.maxExamsPerDay ?? 2;
-    if (count > maxExamsPerDay) {
-      supervisorDailyLoadViolations.push({ supervisorId, date, count, maxExamsPerDay });
+    if (examIds.size > maxExamsPerDay) {
+      supervisorDailyLoadViolations.push({
+        supervisorId,
+        date,
+        count: examIds.size,
+        examIds: [...examIds],
+        maxExamsPerDay,
+      });
     }
   }
 
@@ -1083,13 +1158,17 @@ export const getScheduleAnalysis = async (scheduleId) => {
     + supervisorDailyLoadViolations.length
     + roomCapacityViolations.length;
 
-  const totalConflicts = schedule.conflicts.length + derivedConflictCount;
+  const unresolvedPersistedConflicts = schedule.conflicts.filter(
+    (conflict) => !conflict.resolved
+  );
+  const totalConflicts = unresolvedPersistedConflicts.length + derivedConflictCount;
 
   const utilization =
     examSlotCapacity.size === 0
       ? 0
       : [...examSlotCapacity.values()].reduce((acc, group) => {
-          return acc + group.requiredSeats / group.totalCapacity;
+          if (group.totalCapacity <= 0) return acc; // Avoid division by zero
+          return acc + (group.requiredSeats / group.totalCapacity);
         }, 0) / examSlotCapacity.size;
 
   return {
@@ -1097,13 +1176,13 @@ export const getScheduleAnalysis = async (scheduleId) => {
     isFinal: schedule.isFinal,
     metrics: {
       totalAssignments: schedule.assignments.length,
-      persistedConflicts: schedule.conflicts.length,
+      persistedConflicts: unresolvedPersistedConflicts.length,
       derivedConflicts: derivedConflictCount,
       totalConflicts,
       averageRoomUtilization: Number(utilization.toFixed(3)),
     },
     conflicts: {
-      persisted: schedule.conflicts,
+      persisted: unresolvedPersistedConflicts,
       derived: derivedConflicts,
     },
   };

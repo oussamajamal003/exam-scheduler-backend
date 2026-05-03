@@ -6,6 +6,11 @@ import { fileURLToPath } from 'url';
 import { errorHandler } from './middlewares/errorHandler.js';
 import { requestLogger } from './middlewares/requestLogger.js';
 import { authenticate } from './middlewares/authMiddleware.js';
+import { roleGuard } from './guards/roleGuard.js';
+import { validate } from './middlewares/validate.js';
+import { generateScheduleSchema } from './modules/scheduling/schedulingValidation.js';
+import { generateSchedule } from './modules/scheduling/schedulingController.js';
+import * as schedulesController from './modules/schedules/schedulesController.js';
 
 const swaggerDocument = YAML.load(
     fileURLToPath(new URL('./docs/openapi.yaml', import.meta.url))
@@ -62,6 +67,10 @@ app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/conflicts', conflictRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/demo-data', demoDataRoutes);
+
+// Compatibility aliases for the first scheduling prototype API surface.
+app.post('/generate-schedule', authenticate, roleGuard(['ADMIN']), validate(generateScheduleSchema), generateSchedule);
+app.get('/schedules', authenticate, roleGuard(['ADMIN']), schedulesController.getAll);
 
 // Global Error Handler (must be last middleware)
 app.use(errorHandler);

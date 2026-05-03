@@ -25,3 +25,21 @@ export const detect = catchAsync(async (req, res) => {
   const result = await service.detect(req.body, req.user);
   sendResponse(res, 200, 'Conflicts detected successfully', result);
 });
+
+// GET /api/conflicts/:id/explanation
+export const getExplanation = catchAsync(async (req, res) => {
+  const result = await service.getExplanation(req.params.id);
+  sendResponse(res, 200, 'Conflict explanation retrieved', result);
+});
+
+// GET /api/conflicts/:id/suggestions
+export const getSuggestions = catchAsync(async (req, res) => {
+  const result = await service.getSuggestions(req.params.id);
+  sendResponse(res, 200, 'Conflict suggestions retrieved', result);
+});
+
+// POST /api/conflicts/:id/resolve
+export const resolve = catchAsync(async (req, res) => {
+  const result = await service.resolve(req.params.id, req.user);
+  sendResponse(res, 200, 'Conflict resolved successfully', result);
+});

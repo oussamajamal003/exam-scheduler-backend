@@ -62,10 +62,10 @@ const courseCatalog = [
 ];
 
 const centers = [
-  ['Main Campus', 'DEMO-MAIN', 'Central Academic District'],
-  ['North Campus', 'DEMO-NORTH', 'North Science Complex'],
-  ['Innovation Campus', 'DEMO-INNOV', 'Technology Park'],
-  ['Health Campus', 'DEMO-HEALTH', 'Medical District'],
+  ['Demo Main Campus', 'DEMO-MAIN', 'Central Academic District'],
+  ['Demo North Campus', 'DEMO-NORTH', 'North Science Complex'],
+  ['Demo Innovation Campus', 'DEMO-INNOV', 'Technology Park'],
+  ['Demo Health Campus', 'DEMO-HEALTH', 'Medical District'],
 ];
 
 const roomTemplates = [
@@ -189,18 +189,12 @@ const clearDemoDataWithTx = async (tx) => {
   });
   const demoCenterIds = demoCenterRows.map((c) => c.id);
 
+  // Always delete demo supervisor records by email pattern (covers partial-state runs)
+  const demoSupEmails = demoSupervisorEmails();
+  await tx.supervisor.deleteMany({ where: { user: { email: { in: demoSupEmails } } } });
+  await tx.user.deleteMany({ where: { email: { in: demoSupEmails } } });
+
   if (demoCenterIds.length > 0) {
-    // Collect user IDs of supervisors tied to demo centers before deleting them
-    const linkedSupervisors = await tx.supervisor.findMany({
-      where: { centerId: { in: demoCenterIds } },
-      select: { userId: true },
-    });
-    await tx.supervisor.deleteMany({ where: { centerId: { in: demoCenterIds } } });
-    // Delete those supervisor user accounts
-    const linkedUserIds = linkedSupervisors.map((s) => s.userId);
-    if (linkedUserIds.length > 0) {
-      await tx.user.deleteMany({ where: { id: { in: linkedUserIds } } });
-    }
     await tx.room.deleteMany({ where: { centerId: { in: demoCenterIds } } });
     await tx.center.deleteMany({ where: { id: { in: demoCenterIds } } });
   }
@@ -263,8 +257,10 @@ const createCourses = async (tx, programByCode, semester) => {
   const map = new Map();
   for (const [baseCode, title, programCode] of courseCatalog) {
     const code = `${DEMO_PREFIX}${baseCode}`;
-    const row = await tx.course.create({
-      data: { code, title, programId: programByCode.get(programCode).id, semesterId: semester.id, credits: 3, description: 'Large demo course for relational UI and scheduling tests.', isActive: true },
+    const row = await tx.course.upsert({
+      where: { code_semesterId: { code, semesterId: semester.id } },
+      update: { title, programId: programByCode.get(programCode).id, credits: 3, description: 'Large demo course for relational UI and scheduling tests.', isActive: true },
+      create: { code, title, programId: programByCode.get(programCode).id, semesterId: semester.id, credits: 3, description: 'Large demo course for relational UI and scheduling tests.', isActive: true },
     });
     map.set(code, row);
   }
@@ -309,14 +305,17 @@ const createCourseOfferings = async (tx, courseByCode, semester) => {
 
 const createCentersAndRooms = async (tx) => {
   const centerByCode = new Map();
-  for (const [name, code, location] of centers) {
-    const center = await tx.center.create({ data: { name, code, location, description: 'Large demo center for scheduling tests.', isActive: true } });
+  for (const [centerIndex, [centerName, code, location]] of centers.entries()) {
+    const center = await tx.center.upsert({
+      where: { code },
+      update: { name: centerName, location, description: 'Large demo center for scheduling tests.', isActive: true },
+      create: { name: centerName, code, location, description: 'Large demo center for scheduling tests.', isActive: true },
+    });
     centerByCode.set(code, center);
-  }
-  for (const [centerIndex, [, centerCode]] of centers.entries()) {
-    const center = centerByCode.get(centerCode);
-    for (const [roomIndex, [name, capacity]] of roomTemplates.entries()) {
-      await tx.room.create({ data: { centerId: center.id, name: `${name}-${centerIndex + 1}`, capacity, status: 'AVAILABLE' } });
+    // Remove any stale rooms from a previous run before re-creating
+    await tx.room.deleteMany({ where: { centerId: center.id } });
+    for (const [roomName, capacity] of roomTemplates) {
+      await tx.room.create({ data: { centerId: center.id, name: `${roomName}-${centerIndex + 1}`, capacity, status: 'AVAILABLE' } });
     }
   }
   return centerByCode;
@@ -327,16 +326,23 @@ const createSupervisors = async (tx, centerByCode, passwordHash) => {
   for (let index = 0; index < TARGET_SUPERVISORS; index += 1) {
     const name = `Supervisor ${fullName(index)}`;
     const user = await upsertUser(tx, { name, email: supervisorEmail(index), role: 'SUPERVISOR', passwordHash });
-    await tx.supervisor.create({ data: { userId: user.id, centerId: centerRows[index % centerRows.length].id, department: index % 2 === 0 ? 'Academic Affairs' : 'Exam Operations', maxExamsPerDay: 1 } });
+    await tx.supervisor.upsert({
+      where: { userId: user.id },
+      update: { centerId: centerRows[index % centerRows.length].id, department: index % 2 === 0 ? 'Academic Affairs' : 'Exam Operations', maxExamsPerDay: 1 },
+      create: { userId: user.id, centerId: centerRows[index % centerRows.length].id, department: index % 2 === 0 ? 'Academic Affairs' : 'Exam Operations', maxExamsPerDay: 1 },
+    });
   }
 };
 
 const createStudents = async (tx, programByCode, passwordHash) => {
   const students = [];
   for (let index = 0; index < TARGET_STUDENTS; index += 1) {
+    const universityId = `${DEMO_PREFIX}STU-${String(index + 1).padStart(4, '0')}`;
     const user = await upsertUser(tx, { name: fullName(index), email: studentEmail(index), role: 'STUDENT', passwordHash });
-    const student = await tx.student.create({
-      data: { userId: user.id, universityId: `${DEMO_PREFIX}STU-${String(index + 1).padStart(4, '0')}`, programId: programByCode.get(programCodes[index % programCodes.length]).id },
+    const student = await tx.student.upsert({
+      where: { universityId },
+      update: { userId: user.id, programId: programByCode.get(programCodes[index % programCodes.length]).id },
+      create: { userId: user.id, universityId, programId: programByCode.get(programCodes[index % programCodes.length]).id },
     });
     students.push(student);
   }
@@ -344,9 +350,14 @@ const createStudents = async (tx, programByCode, passwordHash) => {
 };
 
 const createTimeSlots = async (tx) => {
-  for (const [date, start, end] of generateSlotSpecs()) {
-    await tx.timeSlot.create({ data: { startTime: toDate(date, start), endTime: toDate(date, end), date: toDate(date, '00:00'), duration: 120, createdBy: 'demo-data' } });
-  }
+  const data = generateSlotSpecs().map(([date, start, end]) => ({
+    startTime: toDate(date, start),
+    endTime: toDate(date, end),
+    date: toDate(date, '00:00'),
+    duration: 120,
+    createdBy: 'demo-data',
+  }));
+  await tx.timeSlot.createMany({ data, skipDuplicates: true });
 };
 
 const createExams = async (tx, offeringByCode) => {

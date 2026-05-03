@@ -16,6 +16,9 @@ const uuidParamSchema = z.object({
 
 export const getConflictSchema = uuidParamSchema;
 export const getConflictsByScheduleSchema = uuidParamSchema;
+export const getConflictExplanationSchema = uuidParamSchema;
+export const getConflictSuggestionsSchema = uuidParamSchema;
+export const resolveConflictSchema = uuidParamSchema;
 
 export const detectConflictsSchema = z.object({
   body: z.object({
