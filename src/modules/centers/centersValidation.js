@@ -10,6 +10,7 @@ export const createCenterSchema = z.object({
     code: z.string().optional(),
     description: z.string().optional(),
     isActive: z.boolean().optional().default(true),
+    supervisors: z.array(z.string().min(1)).optional().default([]),
   }),
 });
 
@@ -21,6 +22,7 @@ export const updateCenterSchema = z.object({
     code: z.string().optional(),
     description: z.string().optional(),
     isActive: z.boolean().optional(),
+    supervisors: z.array(z.string().min(1)).optional(),
   }),
 });
 

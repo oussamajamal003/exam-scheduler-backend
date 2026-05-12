@@ -11,7 +11,7 @@ datasource db {
 // -----------------------------------
 enum Role {
   ADMIN
-  SUPERVISOR
+  PROCTOR
   STUDENT
 }
 
@@ -21,14 +21,6 @@ enum ExamStatus {
   IN_PROGRESS
   COMPLETED
   CANCELLED
-}
-
-enum ConflictType {
-  STUDENT_OVERLAP
-  SUPERVISOR_DOUBLE_BOOKED
-  ROOM_OVERCAPACITY
-  RESOURCE_UNAVAILABLE
-  TIME_CONSTRAINT_VIOLATION
 }
 
 enum RoomStatus {
@@ -48,6 +40,22 @@ enum SemesterStatus {
   PAST
 }
 
+enum SchedulingAlgorithmType {
+  HYBRID_CONSTRAINT_BASED
+}
+
+enum ScheduleGenerationStage {
+  PREPARED
+  VALIDATED
+  DRAFT_BUILT
+  EVALUATED
+  OPTIMIZED
+  RE_EVALUATED
+  CONFIRMED
+  GENERATED
+  BLOCKED
+}
+
 // -----------------------------------
 // USER SYSTEM
 // -----------------------------------
@@ -61,7 +69,7 @@ model User {
   updatedAt DateTime @updatedAt
 
   student    Student?
-  supervisor Supervisor?
+  proctor    Proctor?
 
   @@map("users")
 }
@@ -83,7 +91,7 @@ model Student {
   updatedBy   String?
 }
 
-model Supervisor {
+model Proctor {
   id             String  @id @default(uuid())
   userId         String  @unique
   user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -92,9 +100,10 @@ model Supervisor {
   department     String?
   maxExamsPerDay Int?    @default(2)
 
-  assignments ExamAssignment[]
+  assignments         ExamAssignment[]
+  availableTimeSlots  ProctorAvailability[]
 
-  @@map("supervisors")
+  @@map("proctors")
   createdBy   String?
   updatedBy   String?
 }
@@ -240,8 +249,9 @@ model Center {
   updatedAt    DateTime       @updatedAt
 
 
-  rooms       Room[]
-  supervisors Supervisor[]
+  rooms        Room[]
+  proctors     Proctor[]
+  supervisors  String[] @default([])
 
   @@map("centers")
   createdBy   String?
@@ -274,13 +284,25 @@ model TimeSlot {
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
-  assignments ExamAssignment[]
+  assignments         ExamAssignment[]
+  availableProctors   ProctorAvailability[]
 
   @@unique([startTime, endTime])
   @@index([date])
   @@map("time_slots")
   createdBy   String?
   updatedBy   String?
+}
+
+model ProctorAvailability {
+  proctorId  String
+  timeSlotId String
+  proctor    Proctor  @relation(fields: [proctorId], references: [id], onDelete: Cascade)
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@id([proctorId, timeSlotId])
+  @@index([timeSlotId])
+  @@map("proctor_availabilities")
 }
 
 // -----------------------------------
@@ -310,9 +332,14 @@ model Schedule {
   createdBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  algorithmType       SchedulingAlgorithmType @default(HYBRID_CONSTRAINT_BASED)
+  generationStage     ScheduleGenerationStage @default(GENERATED)
+  qualityScore        Float?
+  hardConstraintScore Int                     @default(0)
+  softConstraintScore Int                     @default(0)
+  algorithmMetadata   Json?
 
   assignments ExamAssignment[]
-  conflicts   Conflict[]
 
   @@map("schedules")
 }
@@ -328,41 +355,20 @@ model ExamAssignment {
   roomId String
   room   Room   @relation(fields: [roomId], references: [id], onDelete: Restrict)
 
-  supervisorId String
-  supervisor   Supervisor @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  proctorId String
+  proctor   Proctor @relation(fields: [proctorId], references: [id], onDelete: Restrict)
 
   timeSlotId String
   timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
 
   // Prevents algorithm from generating duplicate identical assignments for the same schedule
-  @@unique([scheduleId, examId, roomId, supervisorId, timeSlotId])
+  @@unique([scheduleId, examId, roomId, proctorId, timeSlotId])
   @@index([scheduleId])
   @@index([examId])
   @@index([roomId])
   @@index([timeSlotId])
-  @@index([supervisorId])
+  @@index([proctorId])
   @@map("exam_assignments")
-}
-
-// -----------------------------------
-// CONFLICT SYSTEM
-// -----------------------------------
-model Conflict {
-  id         String   @id @default(uuid())
-  scheduleId String
-  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
-
-  type        ConflictType
-  description String
-  resolved    Boolean      @default(false)
-  resolvedAt  DateTime?
-  resolvedBy  String?
-  createdAt   DateTime     @default(now())
-  createdBy   String?
-  updatedBy   String?
-
-  @@index([scheduleId])
-  @@map("conflicts")
 }
 
 model AuditLog {
@@ -380,7 +386,7 @@ model AuditLog {
 
 // Mini SIS → (Students, Courses, Enrollments)
 //         ↓
-// Scheduling → (Exams, TimeSlots, Rooms, Supervisors)
+// Scheduling → (Exams, TimeSlots, Rooms, Proctors)
 //         ↓
-// Execution → (Schedule, Assignments, Conflicts)
+// Execution → (Schedule, Assignments)
 

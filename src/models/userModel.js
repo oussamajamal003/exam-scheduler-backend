@@ -1,4 +1,4 @@
-import prisma from '../config/prisma.js';
+﻿import prisma from '../config/prisma.js';
 
 // Model Wrappers (Data Access Layer / Repository Pattern)
 // These functions abstract the direct Prisma ORM calls away from the business logic services.
@@ -14,14 +14,14 @@ export const findUserById = async (id) => {
     where: { id },
     include: {
       student: { select: { id: true } },
-      supervisor: { select: { id: true } },
+      proctor: { select: { id: true } },
     },
   });
 };
 
 export const createUser = async (userData) => {
-  // If the user is a student or supervisor, we might eventually want to auto-create
-  // empty student/supervisor records here or in a separate endpoint.
+  // If the user is a student or proctor, we might eventually want to auto-create
+  // empty student/proctor records here or in a separate endpoint.
   // For now, simply create the user object based on the schema's Role enum.
   return await prisma.user.create({
     data: userData,

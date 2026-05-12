@@ -1,8 +1,10 @@
-const ADMIN_ALIASES = new Set(['ADMIN', 'TECH_ADMIN', 'SCHEDULING_ADMIN']);
-const VALID_ROLES = new Set(['ADMIN', 'SUPERVISOR', 'STUDENT']);
+﻿const ADMIN_ALIASES = new Set(['ADMIN', 'TECH_ADMIN', 'SCHEDULING_ADMIN']);
+const PROCTOR_ALIASES = new Set(['PROCTOR', 'SUPERVISOR']);
+const VALID_ROLES = new Set(['ADMIN', 'PROCTOR', 'STUDENT']);
 
 export const normalizeRole = (role) => {
   if (ADMIN_ALIASES.has(role)) return 'ADMIN';
+  if (PROCTOR_ALIASES.has(role)) return 'PROCTOR';
   if (VALID_ROLES.has(role)) return role;
   return null;
 };

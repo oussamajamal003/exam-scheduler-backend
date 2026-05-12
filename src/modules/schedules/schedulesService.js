@@ -1,8 +1,8 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const scheduleInclude = {
-  _count: { select: { assignments: true, conflicts: true } },
+  _count: { select: { assignments: true } },
   assignments: {
     include: {
       exam: {
@@ -25,11 +25,10 @@ const scheduleInclude = {
         },
       },
       room: { include: { center: true } },
-      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
       timeSlot: true,
     },
   },
-  conflicts: true,
 };
 
 export const getAll = async (query = {}) => {

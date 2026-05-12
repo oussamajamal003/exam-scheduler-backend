@@ -1,4 +1,4 @@
-import { verifyToken } from '../utils/jwt.js';
+﻿import { verifyToken } from '../utils/jwt.js';
 import { findUserById } from '../models/userModel.js';
 import { normalizeRole } from './roleGuard.js';
 
@@ -32,7 +32,7 @@ export const authGuard = async (req, res, next) => {
       role: normalizeRole(user.role),
       dbRole: user.role,
       studentId: user.student?.id || null,
-      supervisorId: user.supervisor?.id || null,
+      proctorId: user.proctor?.id || null,
     };
     next();
   } catch (error) {

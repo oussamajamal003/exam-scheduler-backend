@@ -9,8 +9,6 @@ import {
   updateScheduleSchema,
 } from './schedulesValidation.js';
 import * as controller from './schedulesController.js';
-import * as conflictsController from '../conflicts/conflictsController.js';
-import { getConflictsByScheduleSchema } from '../conflicts/conflictsValidation.js';
 import assignmentsRoutes from '../assignments/assignmentsRoutes.js';
 
 const router = express.Router();
@@ -24,13 +22,6 @@ router.get('/:id', validate(getScheduleSchema), controller.getById);
 router.put('/:id', validate(updateScheduleSchema), controller.update);
 router.delete('/:id', validate(getScheduleSchema), controller.remove);
 router.patch('/:id/unpublish', validate(getScheduleSchema), controller.unpublish);
-
-// GET /api/schedules/:id/conflicts
-router.get(
-  '/:id/conflicts',
-  validate(getConflictsByScheduleSchema),
-  conflictsController.getByScheduleId
-);
 
 // /api/schedules/:scheduleId/assignments[/:assignmentId]
 router.use('/:scheduleId/assignments', assignmentsRoutes);

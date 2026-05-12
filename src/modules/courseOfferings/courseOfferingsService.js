@@ -1,4 +1,4 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const courseOfferingInclude = {
@@ -79,7 +79,7 @@ export const getById = async (id) => {
             include: {
               schedule: true,
               room: true,
-              supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+              proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
               timeSlot: true,
             },
           },

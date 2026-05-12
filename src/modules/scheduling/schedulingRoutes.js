@@ -5,6 +5,7 @@ import { roleGuard } from '../../guards/roleGuard.js';
 import {
   prepareSchedulingSchema,
   validateInputSchema,
+  optimizeSchema,
   generateScheduleSchema,
   getAnalysisSchema,
   publishScheduleSchema
@@ -12,6 +13,7 @@ import {
 import {
   prepareScheduling,
   validateInput,
+  optimizeScheduling,
   generateSchedule,
   getScheduleAnalysis,
   publishSchedule
@@ -25,6 +27,7 @@ router.use(roleGuard(['ADMIN']));
 
 router.post('/prepare', validate(prepareSchedulingSchema), prepareScheduling);
 router.post('/validate-input', validate(validateInputSchema), validateInput);
+router.post('/optimize', validate(optimizeSchema), optimizeScheduling);
 router.post('/generate', validate(generateScheduleSchema), generateSchedule);
 
 router.get('/:id/analysis', validate(getAnalysisSchema), getScheduleAnalysis);

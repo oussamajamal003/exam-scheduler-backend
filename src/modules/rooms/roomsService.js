@@ -1,4 +1,4 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const roomInclude = {
@@ -7,7 +7,7 @@ const roomInclude = {
     include: {
       schedule: true,
       exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
-      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
       timeSlot: true,
     },
   },

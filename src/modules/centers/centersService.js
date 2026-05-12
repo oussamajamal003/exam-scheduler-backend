@@ -1,20 +1,32 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const centerInclude = {
   rooms: true,
-  supervisors: {
-    include: {
-      user: { select: { id: true, name: true, email: true, role: true } },
-    },
-  },
-  _count: { select: { rooms: true, supervisors: true } },
+  _count: { select: { rooms: true } },
+};
+
+const normalizeSupervisors = (supervisors = []) => {
+  return [...new Set((supervisors ?? []).map((value) => value?.trim()).filter(Boolean))];
+};
+
+const buildCenterWriteData = async (payload) => {
+  const { supervisors, ...data } = payload;
+
+  if (supervisors === undefined) {
+    return data;
+  }
+
+  return {
+    ...data,
+    supervisors: normalizeSupervisors(supervisors),
+  };
 };
 
 const normalizeCenter = (center) => ({
   ...center,
   roomsCount: center.rooms?.length ?? center._count?.rooms ?? 0,
-  supervisorsCount: center.supervisors?.length ?? center._count?.supervisors ?? 0,
+  supervisorsCount: center.supervisors?.length ?? 0,
 });
 
 export const getAll = async (query = {}) => {
@@ -55,17 +67,19 @@ export const getById = async (id) => {
 };
 
 export const create = async (data) => {
+  const centerData = await buildCenterWriteData(data);
   const center = await prisma.center.create({
-    data,
+    data: centerData,
     include: centerInclude,
   });
   return normalizeCenter(center);
 };
 
 export const update = async (id, data) => {
+  const centerData = await buildCenterWriteData(data);
   const center = await prisma.center.update({
     where: { id },
-    data,
+    data: centerData,
     include: centerInclude,
   });
   return normalizeCenter(center);

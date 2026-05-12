@@ -1,4 +1,4 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const examInclude = {
@@ -7,7 +7,7 @@ const examInclude = {
     include: {
       schedule: true,
       room: true,
-      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
       timeSlot: true,
     },
   },
@@ -19,9 +19,9 @@ const buildAccessWhere = (user) => {
     return { courseOffering: { registrations: { some: { studentId: user.studentId } } } };
   }
 
-  if (user?.role === 'SUPERVISOR') {
-    if (!user.supervisorId) throw new AppError('Supervisor profile is not linked to this user', 403);
-    return { assignments: { some: { supervisorId: user.supervisorId } } };
+  if (user?.role === 'PROCTOR') {
+    if (!user.proctorId) throw new AppError('Proctor profile is not linked to this user', 403);
+    return { assignments: { some: { proctorId: user.proctorId } } };
   }
 
   return {};

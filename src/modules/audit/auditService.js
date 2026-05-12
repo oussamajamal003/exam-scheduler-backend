@@ -1,8 +1,8 @@
-import { getAuditUserId } from '../../middlewares/auditContext.js';
+﻿import { getAuditUserId } from '../../middlewares/auditContext.js';
 
 const modelsWithCreatedBy = new Set([
   'Student',
-  'Supervisor',
+  'Proctor',
   'Program',
   'Semester',
   'Course',
@@ -16,7 +16,7 @@ const modelsWithCreatedBy = new Set([
 
 const modelsWithUpdatedBy = new Set([
   'Student',
-  'Supervisor',
+  'Proctor',
   'Program',
   'Semester',
   'Course',

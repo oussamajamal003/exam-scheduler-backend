@@ -29,6 +29,7 @@ export const update = catchAsync(async (req, res) => {
 
 // DELETE /api/schedules/:scheduleId/assignments/:assignmentId
 export const remove = catchAsync(async (req, res) => {
-  await service.remove(req.params.scheduleId, req.params.assignmentId);
+  const deleteGroup = req.query.deleteGroup === 'true' || req.query.deleteGroup === true;
+  await service.remove(req.params.scheduleId, req.params.assignmentId, { deleteGroup });
   sendResponse(res, 200, 'Assignment deleted successfully');
 });

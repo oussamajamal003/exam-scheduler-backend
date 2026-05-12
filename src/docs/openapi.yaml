@@ -48,7 +48,7 @@ components:
           format: email
         role:
           type: string
-          enum: [ADMIN, SUPERVISOR, STUDENT]
+          enum: [ADMIN, PROCTOR, STUDENT]
     LoginRequest:
       type: object
       required: [email, password]
@@ -640,8 +640,6 @@ tags:
     description: Schedule evaluation and AI utilities.
   - name: Auth
     description: Authentication and user account management.
-  - name: Conflicts
-    description: Conflict detection endpoints.
   - name: Courses
     description: Course management.
   - name: Departments
@@ -664,8 +662,8 @@ tags:
     description: Schedule generation and analysis.
   - name: Students
     description: Student management.
-  - name: Supervisors
-    description: Supervisor management.
+  - name: Proctors
+    description: Proctor management.
   - name: Time Slots
     description: Timeslot availability and management.
 security:
@@ -2776,32 +2774,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /supervisors:
+  /proctors:
     get:
-      tags: [Supervisors]
-      summary: Get all supervisors
+      tags: [Proctors]
+      summary: Get all proctors
       responses:
         '200':
-          description: Supervisors fetched successfully
+          description: Proctors fetched successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
     post:
-      tags: [Supervisors]
-      summary: Create a supervisor
+      tags: [Proctors]
+      summary: Create a proctor
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SupervisorCreate'
+              $ref: '#/components/schemas/ProctorCreate'
             example:
               name: Dr. Alice Johnson
               email: alice.johnson@example.com
       responses:
         '201':
-          description: Supervisor created successfully
+          description: Proctor created successfully
           content:
             application/json:
               schema:
@@ -2824,7 +2822,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /supervisors/{id}:
+  /proctors/{id}:
     parameters:
       - in: path
         name: id
@@ -2833,36 +2831,36 @@ paths:
           type: string
           format: uuid
     get:
-      tags: [Supervisors]
-      summary: Get supervisor by ID
+      tags: [Proctors]
+      summary: Get proctor by ID
       responses:
         '200':
-          description: Supervisor fetched successfully
+          description: Proctor fetched successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '404':
-          description: Supervisor not found
+          description: Proctor not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
     put:
-      tags: [Supervisors]
-      summary: Update a supervisor
+      tags: [Proctors]
+      summary: Update a proctor
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SupervisorUpdate'
+              $ref: '#/components/schemas/ProctorUpdate'
             example:
               name: Dr. Alice Johnson Updated
               email: alice.johnson@example.com
       responses:
         '200':
-          description: Supervisor updated successfully
+          description: Proctor updated successfully
           content:
             application/json:
               schema:
@@ -2886,17 +2884,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Supervisor not found
+          description: Proctor not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
     delete:
-      tags: [Supervisors]
-      summary: Delete a supervisor
+      tags: [Proctors]
+      summary: Delete a proctor
       responses:
         '200':
-          description: Supervisor deleted successfully
+          description: Proctor deleted successfully
           content:
             application/json:
               schema:
@@ -2914,12 +2912,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Supervisor not found
+          description: Proctor not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /supervisors/{id}/workload:
+  /proctors/{id}/workload:
     parameters:
       - in: path
         name: id
@@ -2928,17 +2926,17 @@ paths:
           type: string
           format: uuid
     get:
-      tags: [Supervisors]
-      summary: Get supervisor workload
+      tags: [Proctors]
+      summary: Get proctor workload
       responses:
         '200':
-          description: Supervisor workload fetched successfully
+          description: Proctor workload fetched successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
         '404':
-          description: Supervisor not found
+          description: Proctor not found
           content:
             application/json:
               schema:
@@ -3112,46 +3110,6 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Schedule not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /conflicts/detect:
-    post:
-      tags: [Conflicts]
-      summary: Detect schedule conflicts
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ConflictDetectionRequest'
-            example:
-              scheduleId: '123e4567-e89b-12d3-a456-426614174011'
-              type: ROOM_OVERCAPACITY
-              description: Room capacity exceeded
-              resolved: false
-      responses:
-        '200':
-          description: Conflict detection completed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '400':
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Forbidden
           content:
             application/json:
               schema:

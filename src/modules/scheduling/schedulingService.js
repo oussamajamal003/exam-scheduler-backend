@@ -1,19 +1,50 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import { extractAvailableTimeSlotIds } from '../proctors/proctorAvailability.js';
 
 const DEFAULT_EXAM_DURATION = 120;
-const SUPERVISOR_RATIO = 30; // 1 supervisor per 30 students
-const getRequiredSupervisorCount = (studentCount) => {
-  if (studentCount <= 0) return 1;
-  return Math.ceil(studentCount / SUPERVISOR_RATIO);
+const PROCTOR_RATIO = 20; // 1 proctor per 20 students
+const MAX_STUDENT_EXAMS_PER_DAY = 2;
+const LOCAL_SEARCH_EXAM_LIMIT = 30;
+const LOCAL_SEARCH_CANDIDATE_LIMIT = 6;
+const QUALITY_WEIGHTS = {
+  roomUtilization: 0.25,
+  proctorWorkloadBalance: 0.25,
+  studentSpacing: 0.20,
+  examDistribution: 0.15,
+  preferredSpacing: 0.15,
 };
-const REQUIRED_CONFLICT_TYPES = [
-  'ROOM_OVERCAPACITY',
-  'STUDENT_OVERLAP',
-  'SUPERVISOR_DOUBLE_BOOKED',
-  'RESOURCE_UNAVAILABLE',
-  'TIME_CONSTRAINT_VIOLATION',
+const HYBRID_ALGORITHM_TYPE = 'HYBRID_CONSTRAINT_BASED';
+const NO_VALID_SCHEDULE_MESSAGE = 'No valid conflict-free schedule exists for the current data/resources.';
+const GENERATION_STAGE = {
+  PREPARED: 'PREPARED',
+  VALIDATED: 'VALIDATED',
+  DRAFT_BUILT: 'DRAFT_BUILT',
+  EVALUATED: 'EVALUATED',
+  OPTIMIZED: 'OPTIMIZED',
+  RE_EVALUATED: 'RE_EVALUATED',
+  CONFIRMED: 'CONFIRMED',
+  GENERATED: 'GENERATED',
+  BLOCKED: 'BLOCKED',
+};
+
+const PIPELINE_STAGES = [
+  GENERATION_STAGE.PREPARED,
+  GENERATION_STAGE.VALIDATED,
+  GENERATION_STAGE.DRAFT_BUILT,
+  GENERATION_STAGE.EVALUATED,
+  GENERATION_STAGE.OPTIMIZED,
+  GENERATION_STAGE.RE_EVALUATED,
+  GENERATION_STAGE.CONFIRMED,
+  GENERATION_STAGE.GENERATED,
 ];
+const getRequiredProctorCount = (studentCount) => {
+  if (studentCount <= 0) return 1;
+  return Math.ceil(studentCount / PROCTOR_RATIO);
+};
+const getRequiredProctorsForExam = (exam) => (
+  exam.requiredProctors ?? getRequiredProctorCount(exam.studentCount ?? 0)
+);
 
 const getUniqueStudentIdsFromRegistrations = (registrations = []) => {
   const ids = new Set();
@@ -58,31 +89,183 @@ const buildStudentExamMap = (exams) => {
   return studentToExams;
 };
 
-const getSharedStudentConflictCount = (exam, allExams) => {
-  if (!exam.studentIds?.length) return 0;
+const buildExamConflictCountMap = (studentToExams) => {
+  const examNeighborMap = new Map();
 
-  const studentIds = new Set(exam.studentIds);
-  let conflictCount = 0;
+  for (const examIds of studentToExams.values()) {
+    const relatedExamIds = [...examIds];
+    for (let index = 0; index < relatedExamIds.length; index += 1) {
+      const examId = relatedExamIds[index];
+      if (!examNeighborMap.has(examId)) examNeighborMap.set(examId, new Set());
 
-  for (const otherExam of allExams) {
-    if (otherExam.id === exam.id) continue;
-    if (otherExam.studentIds?.some((studentId) => studentIds.has(studentId))) {
-      conflictCount += 1;
+      const neighbors = examNeighborMap.get(examId);
+      for (let neighborIndex = 0; neighborIndex < relatedExamIds.length; neighborIndex += 1) {
+        if (neighborIndex === index) continue;
+        neighbors.add(relatedExamIds[neighborIndex]);
+      }
     }
   }
 
-  return conflictCount;
+  return new Map(
+    [...examNeighborMap.entries()].map(([examId, neighbors]) => [examId, neighbors.size]),
+  );
 };
+
+const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAssignments }) => {
+  const proctorAvailabilityMap = new Map();
+  const studentDailyLoadMap = new Map();
+  const roomSlotMap = new Map();
+  const studentTimeMap = new Map();
+  const studentTimeRangeMap = new Map();
+  const roomUsageMap = new Map();
+  const roomAvailabilityMap = new Map();
+  const timeslotCapacityMap = new Map();
+  const proctorSlotMap = new Map();
+  const proctorDailyLoadMap = new Map();
+  const roomTimeRangeMap = new Map();
+  const proctorTimeRangeMap = new Map();
+  const slotDayKeyMap = new Map(timeSlots.map((slot) => [slot.id, toDateKey(slot.date ?? slot.startTime)]));
+  const availableRooms = rooms.filter((room) => room.status === 'AVAILABLE');
+
+  for (const proctor of proctors) {
+    proctorAvailabilityMap.set(proctor.id, new Set(proctor.availableTimeSlotIds ?? []));
+  }
+
+  for (const room of rooms) {
+    roomAvailabilityMap.set(
+      room.id,
+      new Set(room.status === 'AVAILABLE' ? timeSlots.map((slot) => slot.id) : []),
+    );
+  }
+
+  for (const slot of timeSlots) {
+    timeslotCapacityMap.set(slot.id, getTotalCapacity(availableRooms));
+  }
+
+  for (const assignment of existingAssignments) {
+    if (!assignment.schedule?.isFinal) continue;
+    const slot = assignment.timeSlot;
+    const slotDayKey = slotDayKeyMap.get(assignment.timeSlotId) ?? (slot ? toDateKey(slot.date ?? slot.startTime) : null);
+
+    addToNestedSet(roomSlotMap, assignment.roomId, assignment.timeSlotId);
+    addToNestedSet(roomUsageMap, assignment.timeSlotId, assignment.roomId);
+    addToNestedSet(proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
+
+    if (slotDayKey) {
+      const proctorDayKey = `${assignment.proctorId}:${slotDayKey}`;
+      proctorDailyLoadMap.set(proctorDayKey, (proctorDailyLoadMap.get(proctorDayKey) ?? 0) + 1);
+    }
+
+    if (slot?.startTime && slot?.endTime) {
+      addTimeRange(proctorTimeRangeMap, assignment.proctorId, slot.startTime, slot.endTime);
+      addTimeRange(roomTimeRangeMap, assignment.roomId, slot.startTime, slot.endTime);
+    }
+
+    for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
+      addToNestedSet(studentTimeMap, studentId, assignment.timeSlotId);
+      if (slot?.startTime && slot?.endTime) {
+        addTimeRange(studentTimeRangeMap, studentId, slot.startTime, slot.endTime);
+      }
+      if (slotDayKey) {
+        const studentDayKey = `${studentId}:${slotDayKey}`;
+        studentDailyLoadMap.set(studentDayKey, (studentDailyLoadMap.get(studentDayKey) ?? 0) + 1);
+      }
+    }
+  }
+
+  for (const exam of exams) {
+    for (const studentId of exam.studentIds) {
+      if (!studentTimeMap.has(studentId)) studentTimeMap.set(studentId, new Set());
+    }
+  }
+
+  return {
+    proctorAvailabilityMap,
+    studentDailyLoadMap,
+    roomSlotMap,
+    studentTimeMap,
+    studentTimeRangeMap,
+    roomUsageMap,
+    roomAvailabilityMap,
+    timeslotCapacityMap,
+    proctorSlotMap,
+    proctorDailyLoadMap,
+    roomTimeRangeMap,
+    proctorTimeRangeMap,
+    slotDayKeyMap,
+  };
+};
+
+const getStaticFeasibleTimeSlotCount = ({ exam, rooms, proctors, timeSlots }) => {
+  const requiredProctors = getRequiredProctorsForExam(exam);
+
+  return timeSlots.filter((slot) => {
+    if (!canSlotFitExam(slot, exam)) return false;
+    const slotCapacity = getTotalCapacity(rooms.filter((room) => room.status === 'AVAILABLE'));
+    if (slotCapacity < exam.requiredSeats) return false;
+    const availableProctors = proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id));
+    return availableProctors.length >= requiredProctors;
+  }).length;
+};
+
+const getStaticFeasibleOptionCount = ({ exam, rooms, proctors, timeSlots }) => {
+  const requiredProctors = getRequiredProctorsForExam(exam);
+  let count = 0;
+
+  for (const slot of timeSlots) {
+    if (!canSlotFitExam(slot, exam)) continue;
+    const availableProctors = proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id));
+    if (availableProctors.length < requiredProctors) continue;
+
+    for (const room of rooms) {
+      if (room.status !== 'AVAILABLE' || room.capacity < exam.requiredSeats) continue;
+      if (availableProctors.some((proctor) => proctor.centerId === room.centerId)) count += 1;
+    }
+  }
+
+  return count;
+};
+
+const addExamFeasibilityStats = ({ exams, rooms, proctors, timeSlots }) => exams.map((exam) => ({
+  ...exam,
+  resourceDemand: exam.requiredSeats + (getRequiredProctorsForExam(exam) * PROCTOR_RATIO),
+  feasibleTimeSlotCount: getStaticFeasibleTimeSlotCount({ exam, rooms, proctors, timeSlots }),
+  feasibleOptionCount: getStaticFeasibleOptionCount({ exam, rooms, proctors, timeSlots }),
+}));
 
 const compareExamsForScheduling = (a, b) => (
   b.studentCount - a.studentCount
-  || b.conflictCount - a.conflictCount
   || b.priority - a.priority
+  || b.resourceDemand - a.resourceDemand
+  || a.feasibleOptionCount - b.feasibleOptionCount
+  || a.feasibleTimeSlotCount - b.feasibleTimeSlotCount
+  || b.conflictCount - a.conflictCount
   || b.difficulty - a.difficulty
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
 );
 
-const normalizeSchedulingData = ({ courseOfferings, rooms, supervisors, timeSlots, existingAssignments }) => {
+const compareExamsLeastConstrainedFirst = (a, b) => (
+  a.conflictCount - b.conflictCount
+  || a.studentCount - b.studentCount
+  || a.priority - b.priority
+  || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
+);
+
+const compareExamsPriorityFirst = (a, b) => (
+  b.priority - a.priority
+  || b.studentCount - a.studentCount
+  || b.conflictCount - a.conflictCount
+  || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
+);
+
+const compareExamsShortestFirst = (a, b) => (
+  (a.duration ?? DEFAULT_EXAM_DURATION) - (b.duration ?? DEFAULT_EXAM_DURATION)
+  || a.conflictCount - b.conflictCount
+  || a.studentCount - b.studentCount
+  || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
+);
+
+const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, existingAssignments }) => {
   const exams = courseOfferings.map((offering) => {
     const exam = offering.exams[0] ?? {};
     const studentIds = getUniqueStudentIdsFromRegistrations(offering.registrations);
@@ -97,6 +280,8 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, supervisors, timeSlot
       courseCode: offering.course?.code ?? null,
       courseTitle: offering.course?.title ?? null,
       semesterId: offering.semesterId,
+      semesterStartDate: offering.semester?.startDate ?? null,
+      semesterEndDate: offering.semester?.endDate ?? null,
       section: offering.section,
       priority: offering.priority ?? 0,
       difficulty: offering.difficulty ?? 0,
@@ -104,36 +289,55 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, supervisors, timeSlot
       expectedStudents,
       studentCount,
       requiredSeats: Math.max(studentCount, expectedStudents, 1),
+      requiredProctors: getRequiredProctorCount(studentCount),
       studentIds,
       courseOffering: offering,
     };
   });
 
-  const examsWithConflictCounts = exams.map((exam) => ({
-    ...exam,
-    conflictCount: getSharedStudentConflictCount(exam, exams),
+  const normalizedRooms = rooms.map((room) => ({
+    id: room.id,
+    name: room.name,
+    capacity: room.capacity,
+    status: room.status,
+    centerId: room.centerId,
+    center: room.center,
   }));
+  const normalizedProctors = proctors.map((proctor) => ({
+    id: proctor.id,
+    centerId: proctor.centerId,
+    center: proctor.center,
+    user: proctor.user,
+    maxExamsPerDay: proctor.maxExamsPerDay ?? 2,
+    availableTimeSlotIds: extractAvailableTimeSlotIds(proctor),
+  }));
+  const studentExamMap = buildStudentExamMap(exams);
+  const examConflictCountMap = buildExamConflictCountMap(studentExamMap);
+  const examsWithConflictCounts = addExamFeasibilityStats({
+    exams: exams.map((exam) => ({
+      ...exam,
+      conflictCount: examConflictCountMap.get(exam.id) ?? 0,
+    })),
+    rooms: normalizedRooms,
+    proctors: normalizedProctors,
+    timeSlots,
+  });
 
   return {
     exams: examsWithConflictCounts,
-    rooms: rooms.map((room) => ({
-      id: room.id,
-      name: room.name,
-      capacity: room.capacity,
-      status: room.status,
-      centerId: room.centerId,
-      center: room.center,
-    })),
-    supervisors: supervisors.map((supervisor) => ({
-      id: supervisor.id,
-      centerId: supervisor.centerId,
-      center: supervisor.center,
-      user: supervisor.user,
-      maxExamsPerDay: supervisor.maxExamsPerDay ?? 2,
-    })),
+    rooms: normalizedRooms,
+    proctors: normalizedProctors,
     timeSlots,
     existingAssignments,
-    studentToExams: buildStudentExamMap(exams),
+    studentExamMap,
+    studentToExams: studentExamMap,
+    lookups: buildSchedulingLookups({
+      exams: examsWithConflictCounts,
+      rooms: normalizedRooms,
+      proctors: normalizedProctors,
+      timeSlots,
+      existingAssignments,
+    }),
   };
 };
 
@@ -165,7 +369,7 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
   const semester = await prisma.semester.findUnique({ where: { id: semesterId } });
   if (!semester) throw new AppError('Semester not found', 404);
 
-  const [courseOfferings, rooms, supervisors, allTimeSlots, existingAssignments] = await Promise.all([
+  const [courseOfferings, rooms, proctors, allTimeSlots, existingAssignments] = await Promise.all([
     prisma.courseOffering.findMany({
       where: { semesterId, status: 'ACTIVE' },
       include: {
@@ -189,10 +393,15 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
       include: { center: true },
       orderBy: [{ capacity: 'asc' }, { name: 'asc' }],
     }),
-    prisma.supervisor.findMany({
+    prisma.proctor.findMany({
       include: {
         center: true,
         user: { select: { id: true, name: true, email: true } },
+        availableTimeSlots: {
+          select: {
+            timeSlotId: true,
+          },
+        },
       },
       orderBy: [{ center: { name: 'asc' } }, { user: { name: 'asc' } }],
     }),
@@ -203,7 +412,7 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
         schedule: true,
         timeSlot: true,
         room: true,
-        supervisor: true,
+        proctor: true,
         exam: {
           include: {
             courseOffering: {
@@ -219,7 +428,7 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
 
   const createdExamCount = options.ensureExams ? await ensureExamRecords(courseOfferings) : 0;
   const timeSlots = getTimeslotsInSemesterRange(semester, allTimeSlots);
-  const normalized = normalizeSchedulingData({ courseOfferings, rooms, supervisors, timeSlots, existingAssignments });
+  const normalized = normalizeSchedulingData({ courseOfferings, rooms, proctors, timeSlots, existingAssignments });
 
   return { semester, normalized, createdExamCount };
 };
@@ -240,61 +449,118 @@ const hasTemporalOverlap = (map, key, slot) => {
   return ranges.some(({ start, end }) => timeRangesOverlap(slot.startTime, slot.endTime, start, end));
 };
 
-const createUsageTracker = (existingAssignments = []) => {
+const cloneNestedSetMap = (source = new Map()) => new Map(
+  [...source.entries()].map(([key, values]) => [key, new Set(values)]),
+);
+
+const cloneCountMap = (source = new Map()) => new Map(source.entries());
+
+const cloneRangeMap = (source = new Map()) => new Map(
+  [...source.entries()].map(([key, ranges]) => [key, ranges.map((range) => ({ ...range }))]),
+);
+
+const createUsageTracker = (existingAssignments = [], lookups = null) => {
+  if (lookups) {
+    return {
+      roomSlotMap: cloneNestedSetMap(lookups.roomSlotMap),
+      proctorSlotMap: cloneNestedSetMap(lookups.proctorSlotMap),
+      studentTimeMap: cloneNestedSetMap(lookups.studentTimeMap),
+      studentTimeRangeMap: cloneRangeMap(lookups.studentTimeRangeMap),
+      studentDailyLoadMap: cloneCountMap(lookups.studentDailyLoadMap),
+      proctorDailyLoadMap: cloneCountMap(lookups.proctorDailyLoadMap),
+      proctorTimeRangeMap: cloneRangeMap(lookups.proctorTimeRangeMap),
+      roomTimeRangeMap: cloneRangeMap(lookups.roomTimeRangeMap),
+    };
+  }
+
   const usage = {
-    roomSlotUsed: new Set(),
-    supervisorSlotUsed: new Set(),
-    studentSlotMap: new Map(),
-    supervisorDayCount: new Map(),
-    supervisorTimeRanges: new Map(), // temporal overlap guard
-    roomTimeRanges: new Map(),       // temporal overlap guard
+    roomSlotMap: new Map(),
+    proctorSlotMap: new Map(),
+    studentTimeMap: new Map(),
+    studentTimeRangeMap: new Map(),
+    studentDailyLoadMap: new Map(),
+    proctorDailyLoadMap: new Map(),
+    proctorTimeRangeMap: new Map(),
+    roomTimeRangeMap: new Map(),
   };
+
+  const reservedStudentExamSlots = new Set();
 
   for (const assignment of existingAssignments) {
     if (!assignment.schedule?.isFinal) continue;
 
-    usage.roomSlotUsed.add(`${assignment.roomId}:${assignment.timeSlotId}`);
-    usage.supervisorSlotUsed.add(`${assignment.supervisorId}:${assignment.timeSlotId}`);
+    addToNestedSet(usage.roomSlotMap, assignment.roomId, assignment.timeSlotId);
+    addToNestedSet(usage.proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
 
     const slotDate = assignment.timeSlot?.date ?? assignment.timeSlot?.startTime;
     if (slotDate) {
-      const key = `${assignment.supervisorId}:${toDateKey(slotDate)}`;
-      usage.supervisorDayCount.set(key, (usage.supervisorDayCount.get(key) ?? 0) + 1);
+      const key = `${assignment.proctorId}:${toDateKey(slotDate)}`;
+      usage.proctorDailyLoadMap.set(key, (usage.proctorDailyLoadMap.get(key) ?? 0) + 1);
     }
 
     const ts = assignment.timeSlot;
     if (ts?.startTime && ts?.endTime) {
-      addTimeRange(usage.supervisorTimeRanges, assignment.supervisorId, ts.startTime, ts.endTime);
-      addTimeRange(usage.roomTimeRanges, assignment.roomId, ts.startTime, ts.endTime);
+      addTimeRange(usage.proctorTimeRangeMap, assignment.proctorId, ts.startTime, ts.endTime);
+      addTimeRange(usage.roomTimeRangeMap, assignment.roomId, ts.startTime, ts.endTime);
     }
 
-    for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
-      addToNestedSet(usage.studentSlotMap, studentId, assignment.timeSlotId);
+    const studentReservationKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    if (!reservedStudentExamSlots.has(studentReservationKey)) {
+      reservedStudentExamSlots.add(studentReservationKey);
+      for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
+        addToNestedSet(usage.studentTimeMap, studentId, assignment.timeSlotId);
+        if (assignment.timeSlot?.startTime && assignment.timeSlot?.endTime) {
+          addTimeRange(usage.studentTimeRangeMap, studentId, assignment.timeSlot.startTime, assignment.timeSlot.endTime);
+        }
+        const studentSlotDate = assignment.timeSlot?.date ?? assignment.timeSlot?.startTime;
+        if (studentSlotDate) {
+          const studentDayKey = `${studentId}:${toDateKey(studentSlotDate)}`;
+          usage.studentDailyLoadMap.set(studentDayKey, (usage.studentDailyLoadMap.get(studentDayKey) ?? 0) + 1);
+        }
+      }
     }
   }
 
   return usage;
 };
 
-const reserveAssignment = (usage, assignment, exam, slot, slotDayKey = toDateKey(slot.date ?? slot.startTime)) => {
-  usage.roomSlotUsed.add(`${assignment.roomId}:${assignment.timeSlotId}`);
-  usage.supervisorSlotUsed.add(`${assignment.supervisorId}:${assignment.timeSlotId}`);
+const reserveAssignment = (usage, assignment, exam, slot, slotDayKey = toDateKey(slot.date ?? slot.startTime), options = {}) => {
+  addToNestedSet(usage.roomSlotMap, assignment.roomId, assignment.timeSlotId);
+  addToNestedSet(usage.proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
 
-  const supervisorDayKey = `${assignment.supervisorId}:${slotDayKey}`;
-  usage.supervisorDayCount.set(supervisorDayKey, (usage.supervisorDayCount.get(supervisorDayKey) ?? 0) + 1);
+  const proctorDayKey = `${assignment.proctorId}:${slotDayKey}`;
+  usage.proctorDailyLoadMap.set(proctorDayKey, (usage.proctorDailyLoadMap.get(proctorDayKey) ?? 0) + 1);
 
   if (slot.startTime && slot.endTime) {
-    addTimeRange(usage.supervisorTimeRanges, assignment.supervisorId, slot.startTime, slot.endTime);
-    addTimeRange(usage.roomTimeRanges, assignment.roomId, slot.startTime, slot.endTime);
+    addTimeRange(usage.proctorTimeRangeMap, assignment.proctorId, slot.startTime, slot.endTime);
+    addTimeRange(usage.roomTimeRangeMap, assignment.roomId, slot.startTime, slot.endTime);
   }
 
+  if (options.reserveStudents === false) return;
+
   for (const studentId of exam.studentIds) {
-    addToNestedSet(usage.studentSlotMap, studentId, assignment.timeSlotId);
+    addToNestedSet(usage.studentTimeMap, studentId, assignment.timeSlotId);
+    if (slot.startTime && slot.endTime) {
+      addTimeRange(usage.studentTimeRangeMap, studentId, slot.startTime, slot.endTime);
+    }
+    const studentDayKey = `${studentId}:${slotDayKey}`;
+    usage.studentDailyLoadMap.set(studentDayKey, (usage.studentDailyLoadMap.get(studentDayKey) ?? 0) + 1);
   }
 };
 
-const hasStudentOverlap = (usage, exam, slotId) => {
-  return exam.studentIds.some((studentId) => usage.studentSlotMap.get(studentId)?.has(slotId));
+const hasStudentOverlap = (usage, exam, slotOrId) => {
+  const slotId = typeof slotOrId === 'object' ? slotOrId.id : slotOrId;
+  const slot = typeof slotOrId === 'object' ? slotOrId : null;
+  return exam.studentIds.some((studentId) => (
+    usage.studentTimeMap.get(studentId)?.has(slotId)
+    || (slot ? hasTemporalOverlap(usage.studentTimeRangeMap, studentId, slot) : false)
+  ));
+};
+
+const hasStudentDailyLoadCapacity = (usage, exam, slotDayKey) => {
+  return exam.studentIds.every((studentId) => (
+    (usage.studentDailyLoadMap.get(`${studentId}:${slotDayKey}`) ?? 0) < MAX_STUDENT_EXAMS_PER_DAY
+  ));
 };
 
 const buildSlotDayKeyMap = (timeSlots) => {
@@ -305,31 +571,42 @@ const sortRoomsByCapacityDesc = (rooms) => {
   return [...rooms].sort((a, b) => b.capacity - a.capacity || a.name.localeCompare(b.name));
 };
 
+const sortRoomsByCapacityAsc = (rooms) => {
+  return [...rooms].sort((a, b) => a.capacity - b.capacity || a.name.localeCompare(b.name));
+};
+
 const isRoomAvailableForSlot = (room, slot, usage) => {
   if (room.status !== 'AVAILABLE') return false;
-  if (usage.roomSlotUsed.has(`${room.id}:${slot.id}`)) return false;
-  if (hasTemporalOverlap(usage.roomTimeRanges, room.id, slot)) return false;
+  if (usage.roomSlotMap.get(room.id)?.has(slot.id)) return false;
+  if (hasTemporalOverlap(usage.roomTimeRangeMap, room.id, slot)) return false;
   return true;
 };
 
-const isSupervisorAvailableForSlot = (supervisor, slot, usage, slotDayKey = toDateKey(slot.date ?? slot.startTime)) => {
-  if (usage.supervisorSlotUsed.has(`${supervisor.id}:${slot.id}`)) return false;
-  if (hasTemporalOverlap(usage.supervisorTimeRanges, supervisor.id, slot)) return false;
+const isProctorAvailableForSlot = (proctor, slot, usage, slotDayKey = toDateKey(slot.date ?? slot.startTime)) => {
+  if (!proctor.availableTimeSlotIds?.has(slot.id)) return false;
+  if (usage.proctorSlotMap.get(proctor.id)?.has(slot.id)) return false;
+  if (hasTemporalOverlap(usage.proctorTimeRangeMap, proctor.id, slot)) return false;
 
-  const supervisorDayKey = `${supervisor.id}:${slotDayKey}`;
-  return (usage.supervisorDayCount.get(supervisorDayKey) ?? 0) < supervisor.maxExamsPerDay;
+  const proctorDayKey = `${proctor.id}:${slotDayKey}`;
+  return (usage.proctorDailyLoadMap.get(proctorDayKey) ?? 0) < proctor.maxExamsPerDay;
 };
 
 const getAvailableRoomsForSlot = (sortedRooms, slot, usage) => {
   return sortedRooms.filter((room) => isRoomAvailableForSlot(room, slot, usage));
 };
 
-const getAvailableSupervisorsForSlot = (supervisors, slot, usage, slotDayKey) => {
-  return supervisors.filter((supervisor) => isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey));
+const getAvailableProctorsForSlot = (proctors, slot, usage, slotDayKey) => {
+  return proctors
+    .filter((proctor) => isProctorAvailableForSlot(proctor, slot, usage, slotDayKey))
+    .sort((a, b) => (
+      (usage.proctorDailyLoadMap.get(`${a.id}:${slotDayKey}`) ?? 0)
+      - (usage.proctorDailyLoadMap.get(`${b.id}:${slotDayKey}`) ?? 0)
+      || (a.user?.name ?? '').localeCompare(b.user?.name ?? '')
+    ));
 };
 
-const getSupervisorsForRoom = (supervisors, room) => {
-  return supervisors.filter((supervisor) => supervisor.centerId === room.centerId);
+const getProctorsForRoom = (proctors, room) => {
+  return proctors.filter((proctor) => proctor.centerId === room.centerId);
 };
 
 const getTotalCapacity = (rooms) => rooms.reduce((total, room) => total + room.capacity, 0);
@@ -339,79 +616,123 @@ const getSlotDurationMinutes = (slot) => {
   return Math.max(0, Math.round((slot.endTime.getTime() - slot.startTime.getTime()) / 60000));
 };
 
-const canSlotFitExam = (slot, exam) => getSlotDurationMinutes(slot) >= (exam.duration ?? DEFAULT_EXAM_DURATION);
+const hasValidTimeSlotWindow = (slot) => {
+  if (!slot?.startTime || !slot?.endTime) return false;
 
-const isValidAssignment = ({ exam, slot, room, supervisor, usage, slotDayKey }) => {
-  if (!canSlotFitExam(slot, exam)) return false;
-  if (hasStudentOverlap(usage, exam, slot.id)) return false;
-  if (room.centerId !== supervisor.centerId) return false;
-  if (!isRoomAvailableForSlot(room, slot, usage)) return false;
-  if (room.capacity < exam.requiredSeats) return false;
-  return isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey);
+  const startTime = slot.startTime instanceof Date ? slot.startTime : new Date(slot.startTime);
+  const endTime = slot.endTime instanceof Date ? slot.endTime : new Date(slot.endTime);
+  const slotDate = slot.date ?? slot.startTime;
+  const dateValue = slotDate instanceof Date ? slotDate : new Date(slotDate);
+
+  return !Number.isNaN(startTime.getTime())
+    && !Number.isNaN(endTime.getTime())
+    && !Number.isNaN(dateValue.getTime())
+    && endTime > startTime;
 };
 
-const buildRoomAllocation = ({ exam, slot, sortedRooms, supervisors, usage, slotDayKey }) => {
+const isSlotWithinSemesterWindow = (slot, exam) => {
+  const slotStart = slot?.startTime instanceof Date ? slot.startTime : new Date(slot?.startTime);
+  const slotEnd = slot?.endTime instanceof Date ? slot.endTime : new Date(slot?.endTime);
+  const semesterStart = exam?.semesterStartDate instanceof Date
+    ? exam.semesterStartDate
+    : new Date(exam?.semesterStartDate);
+  const semesterEnd = exam?.semesterEndDate instanceof Date
+    ? exam.semesterEndDate
+    : new Date(exam?.semesterEndDate);
+
+  if (
+    Number.isNaN(slotStart?.getTime?.())
+    || Number.isNaN(slotEnd?.getTime?.())
+    || Number.isNaN(semesterStart?.getTime?.())
+    || Number.isNaN(semesterEnd?.getTime?.())
+  ) {
+    return false;
+  }
+
+  return slotStart >= semesterStart && slotEnd <= semesterEnd;
+};
+
+const hasEnrollmentConstraintSatisfied = (exam) => (
+  (exam.studentCount ?? 0) > 0 && (exam.studentIds?.length ?? 0) > 0
+);
+
+const canSlotFitExam = (slot, exam) => {
+  if (!hasValidTimeSlotWindow(slot)) return false;
+  if (!isSlotWithinSemesterWindow(slot, exam)) return false;
+  return getSlotDurationMinutes(slot) >= (exam.duration ?? DEFAULT_EXAM_DURATION);
+};
+
+const isValidAssignment = ({ exam, slot, room, proctor, usage, slotDayKey }) => {
+  if (!canSlotFitExam(slot, exam)) return false;
+  if (hasStudentOverlap(usage, exam, slot)) return false;
+  if (room.centerId !== proctor.centerId) return false;
+  if (!isRoomAvailableForSlot(room, slot, usage)) return false;
+  if (room.capacity < exam.requiredSeats) return false;
+  return isProctorAvailableForSlot(proctor, slot, usage, slotDayKey);
+};
+
+const buildRoomAllocation = ({ exam, slot, sortedRooms, proctors, usage, slotDayKey }) => {
   if (!canSlotFitExam(slot, exam)) return null;
-  if (hasStudentOverlap(usage, exam, slot.id)) return null;
+  if (hasStudentOverlap(usage, exam, slot)) return null;
 
   const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
-  const availableSupervisors = getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKey);
-  const requiredSupervisors = getRequiredSupervisorCount(exam.requiredSeats);
+  const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey);
+  const requiredProctors = getRequiredProctorsForExam(exam);
 
-  if (availableSupervisors.length < requiredSupervisors) return null;
+  if (availableProctors.length < requiredProctors) return null;
 
-  // Single-room fast path: one room seats all students and all supervisors come from that room's center.
+  // Single-room fast path: one room seats all students and all proctors come from that room's center.
   const singleRoom = availableRooms.find((room) => {
     if (room.capacity < exam.requiredSeats) return false;
-    return getSupervisorsForRoom(availableSupervisors, room).length >= requiredSupervisors;
+    return getProctorsForRoom(availableProctors, room).length >= requiredProctors;
   });
   if (singleRoom) {
-    const roomSupervisors = getSupervisorsForRoom(availableSupervisors, singleRoom);
-    const supervisor = roomSupervisors[0];
-    if (isValidAssignment({ exam, slot, room: singleRoom, supervisor, usage, slotDayKey })) {
-      // Assign all required supervisors to the same room
-      return roomSupervisors.slice(0, requiredSupervisors).map((sup) => ({
+    const roomProctors = getProctorsForRoom(availableProctors, singleRoom);
+    const proctor = roomProctors[0];
+    if (isValidAssignment({ exam, slot, room: singleRoom, proctor, usage, slotDayKey })) {
+      // Assign all required proctors to the same room
+      return roomProctors.slice(0, requiredProctors).map((sup) => ({
         room: singleRoom,
-        supervisor: sup,
+        proctor: sup,
       }));
     }
   }
 
-  // Multi-room path: accumulate rooms with center-matched supervisors until capacity is met.
+  // Multi-room path: accumulate rooms with center-matched proctors until capacity is met.
   const selectedRooms = [];
   const allocation = [];
-  const usedSupervisorIds = new Set();
+  const usedProctorIds = new Set();
   let totalCapacity = 0;
 
   for (const room of availableRooms) {
-    const supervisor = getSupervisorsForRoom(availableSupervisors, room)
-      .find((candidate) => !usedSupervisorIds.has(candidate.id));
-    if (!supervisor) continue;
+    const proctor = getProctorsForRoom(availableProctors, room)
+      .find((candidate) => !usedProctorIds.has(candidate.id));
+    if (!proctor) continue;
 
     selectedRooms.push(room);
-    allocation.push({ room, supervisor });
-    usedSupervisorIds.add(supervisor.id);
+    allocation.push({ room, proctor });
+    usedProctorIds.add(proctor.id);
     totalCapacity += room.capacity;
     if (totalCapacity >= exam.requiredSeats) break;
   }
 
   if (totalCapacity < exam.requiredSeats) return null;
 
-  // Need at least one supervisor per room AND requiredSupervisors total
-  const supervisorsNeeded = Math.max(selectedRooms.length, requiredSupervisors);
+  // Need at least one proctor per room AND requiredProctors total
+  const proctorsNeeded = Math.max(selectedRooms.length, requiredProctors);
   if (allocation.length < selectedRooms.length) return null;
 
   for (const room of selectedRooms) {
-    if (allocation.length >= supervisorsNeeded) break;
-    const extraSupervisor = getSupervisorsForRoom(availableSupervisors, room)
-      .find((candidate) => !usedSupervisorIds.has(candidate.id));
-    if (!extraSupervisor) continue;
+    if (allocation.length >= proctorsNeeded) break;
+    const extraProctor = getProctorsForRoom(availableProctors, room)
+      .find((candidate) => !usedProctorIds.has(candidate.id));
+    if (!extraProctor) continue;
 
-    allocation.push({ room, supervisor: extraSupervisor });
-    usedSupervisorIds.add(extraSupervisor.id);
+    allocation.push({ room, proctor: extraProctor });
+    usedProctorIds.add(extraProctor.id);
   }
 
-  if (allocation.length < supervisorsNeeded) return null;
+  if (allocation.length < proctorsNeeded) return null;
 
   return allocation;
 };
@@ -419,26 +740,29 @@ const buildRoomAllocation = ({ exam, slot, sortedRooms, supervisors, usage, slot
 const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) => {
   if (!allocation?.length) return false;
   if (!canSlotFitExam(slot, exam)) return false;
-  if (hasStudentOverlap(usage, exam, slot.id)) return false;
+  if (hasStudentOverlap(usage, exam, slot)) return false;
+  if (!hasStudentDailyLoadCapacity(usage, exam, slotDayKey)) return false;
 
   const checkedRoomIds = new Set();
-  const supervisorIds = new Set();
+  const proctorIds = new Set();
 
-  for (const { room, supervisor } of allocation) {
-    if (!room || !supervisor) return false;
-    if (supervisorIds.has(supervisor.id)) return false;
-    if (room.centerId !== supervisor.centerId) return false;
-    // Only check room availability on first occurrence (multiple supervisors may share a room)
+  for (const { room, proctor } of allocation) {
+    if (!room || !proctor) return false;
+    if (proctorIds.has(proctor.id)) return false;
+    if (room.centerId !== proctor.centerId) return false;
+    // Only check room availability on first occurrence (multiple proctors may share a room)
     if (!checkedRoomIds.has(room.id) && !isRoomAvailableForSlot(room, slot, usage)) return false;
-    if (!isSupervisorAvailableForSlot(supervisor, slot, usage, slotDayKey)) return false;
+    if (!isProctorAvailableForSlot(proctor, slot, usage, slotDayKey)) return false;
 
     checkedRoomIds.add(room.id);
-    supervisorIds.add(supervisor.id);
+    proctorIds.add(proctor.id);
   }
 
-  // Capacity check uses unique rooms only (supervisors can share a room)
+  // Capacity check uses unique rooms only (proctors can share a room)
   const uniqueRooms = [...new Map(allocation.map(({ room }) => [room.id, room])).values()];
-  return getTotalCapacity(uniqueRooms) >= exam.requiredSeats;
+  const uniqueProctorIds = new Set(allocation.map(({ proctor }) => proctor.id));
+  return getTotalCapacity(uniqueRooms) >= exam.requiredSeats
+    && uniqueProctorIds.size >= getRequiredProctorsForExam(exam);
 };
 
 const buildConflictPayload = (scheduleId, type, description) => ({ scheduleId, type, description });
@@ -459,9 +783,9 @@ const getRoomInventoryLabel = (rooms) => rooms
   .map((room) => `${room.name}${room.center?.name ? ` at ${room.center.name}` : ''} (${room.capacity})`)
   .join(', ');
 
-const getSupervisorSampleLabel = (supervisors) => supervisors
+const getProctorSampleLabel = (proctors) => proctors
   .slice(0, 4)
-  .map((supervisor) => supervisor.user?.name ?? 'Unnamed supervisor')
+  .map((proctor) => proctor.user?.name ?? 'Unnamed proctor')
   .join(', ');
 
 const getSlotLabel = (slot) => {
@@ -471,14 +795,23 @@ const getSlotLabel = (slot) => {
   return `${start} to ${end}`;
 };
 
-const getMaxSupervisedCapacity = (rooms, supervisorCount) => {
-  if (supervisorCount <= 0) return 0;
-  return getTotalCapacity(sortRoomsByCapacityDesc(rooms).slice(0, supervisorCount));
+const getMaxSupervisedCapacity = (rooms, proctorCount) => {
+  if (proctorCount <= 0) return 0;
+  return getTotalCapacity(sortRoomsByCapacityDesc(rooms).slice(0, proctorCount));
 };
 
-const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRooms, supervisors, usage, slotDayKeys }) => {
+const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys }) => {
   const examLabel = getExamLabel(exam);
   const totalRoomCapacity = getTotalCapacity(sortedRooms);
+  const requiredProctors = getRequiredProctorsForExam(exam);
+
+  if (!hasEnrollmentConstraintSatisfied(exam)) {
+    return buildConflictPayload(
+      scheduleId,
+      'RESOURCE_UNAVAILABLE',
+      `${examLabel} has no enrolled students and cannot be scheduled until at least one enrollment exists.`,
+    );
+  }
 
   if (timeSlots.length === 0) {
     return buildConflictPayload(
@@ -497,6 +830,14 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     );
   }
 
+  if (proctors.length === 0) {
+    return buildConflictPayload(
+      scheduleId,
+      'RESOURCE_UNAVAILABLE',
+      `No proctors are available to invigilate ${examLabel}. Every exam must have at least one proctor before generation can continue.`,
+    );
+  }
+
   if (totalRoomCapacity < exam.requiredSeats) {
     const roomLabel = getRoomInventoryLabel(sortedRooms);
     return buildConflictPayload(
@@ -506,25 +847,16 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     );
   }
 
-  const requiredSupervisors = getRequiredSupervisorCount(exam.requiredSeats);
-  if (supervisors.length < requiredSupervisors) {
-    const supervisorLabel = getSupervisorSampleLabel(supervisors);
+  if (proctors.length < requiredProctors) {
+    const proctorLabel = getProctorSampleLabel(proctors);
     return buildConflictPayload(
       scheduleId,
       'RESOURCE_UNAVAILABLE',
-      `${examLabel} requires ${exam.requiredSeats} students and needs ${requiredSupervisors} supervisor${requiredSupervisors !== 1 ? 's' : ''} (1 per ${SUPERVISOR_RATIO} students), but only ${supervisors.length} supervisor${supervisors.length !== 1 ? 's' : ''} ${supervisors.length === 1 ? 'is' : 'are'} available${supervisorLabel ? `: ${supervisorLabel}` : ''}.`,
+      `${examLabel} has ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''} and needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} (1 per ${PROCTOR_RATIO} students), but only ${proctors.length} proctor${proctors.length !== 1 ? 's' : ''} ${proctors.length === 1 ? 'is' : 'are'} available${proctorLabel ? `: ${proctorLabel}` : ''}.`,
     );
   }
 
-  if (supervisors.length === 0) {
-    return buildConflictPayload(
-      scheduleId,
-      'SUPERVISOR_DOUBLE_BOOKED',
-      `No supervisors are available to invigilate ${examLabel}.`,
-    );
-  }
-
-  const everySlotHasStudentOverlap = timeSlots.every((slot) => hasStudentOverlap(usage, exam, slot.id));
+  const everySlotHasStudentOverlap = timeSlots.every((slot) => hasStudentOverlap(usage, exam, slot));
   if (everySlotHasStudentOverlap) {
     const studentLabels = getSampleStudentLabels(exam);
     return buildConflictPayload(
@@ -534,42 +866,76 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     );
   }
 
-  const everyNonOverlappingSlotHasNoSupervisor = timeSlots
-    .filter((slot) => !hasStudentOverlap(usage, exam, slot.id))
-    .every((slot) => getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKeys.get(slot.id)).length < requiredSupervisors);
-
-  if (everyNonOverlappingSlotHasNoSupervisor) {
-    const supervisorLabel = getSupervisorSampleLabel(supervisors);
+  const everyFittingSlotExceedsStudentDailyLoad = fittingSlots.every((slot) => (
+    !hasStudentDailyLoadCapacity(usage, exam, slotDayKeys.get(slot.id))
+  ));
+  if (everyFittingSlotExceedsStudentDailyLoad) {
     return buildConflictPayload(
       scheduleId,
-      'SUPERVISOR_DOUBLE_BOOKED',
-      `${examLabel} needs ${requiredSupervisors} supervisor${requiredSupervisors !== 1 ? 's' : ''} but no time slot has enough available supervisors without double-booking or exceeding daily limits${supervisorLabel ? `. Checked supervisors: ${supervisorLabel}.` : '.'}`,
+      'STUDENT_OVERLAP',
+      `${examLabel} cannot be assigned without exceeding the student daily load limit of ${MAX_STUDENT_EXAMS_PER_DAY} exam${MAX_STUDENT_EXAMS_PER_DAY !== 1 ? 's' : ''} per day.`,
     );
   }
 
+  const everyNonOverlappingSlotHasNoProctor = timeSlots
+    .filter((slot) => !hasStudentOverlap(usage, exam, slot))
+    .every((slot) => getAvailableProctorsForSlot(proctors, slot, usage, slotDayKeys.get(slot.id)).length < requiredProctors);
+
+  if (everyNonOverlappingSlotHasNoProctor) {
+    const proctorLabel = getProctorSampleLabel(proctors);
+    return buildConflictPayload(
+      scheduleId,
+      'PROCTOR_DOUBLE_BOOKED',
+      `${examLabel} needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} for ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''}, but no time slot has enough available proctors without violating availability, double-booking, or exceeding daily limits${proctorLabel ? `. Checked proctors: ${proctorLabel}.` : '.'}`,
+    );
+  }
+
+  const capacityEligibleSlots = timeSlots.filter((slot) => {
+    if (!canSlotFitExam(slot, exam) || hasStudentOverlap(usage, exam, slot)) return false;
+    const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
+    return getTotalCapacity(availableRooms) >= exam.requiredSeats;
+  });
+
+  if (capacityEligibleSlots.length > 0) {
+    const everyCapacityEligibleSlotFailsProctorAllocation = capacityEligibleSlots.every((slot) => {
+      const slotDayKey = slotDayKeys.get(slot.id);
+      const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey });
+      return !isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey });
+    });
+
+    if (everyCapacityEligibleSlotFailsProctorAllocation) {
+      const proctorLabel = getProctorSampleLabel(proctors);
+      return buildConflictPayload(
+        scheduleId,
+        'PROCTOR_DOUBLE_BOOKED',
+        `${examLabel} has enough room capacity, but cannot secure ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} for ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''} without violating availability, double-booking proctors, or exceeding maxExamsPerDay${proctorLabel ? `. Checked proctors: ${proctorLabel}.` : '.'}`,
+      );
+    }
+  }
+
   const canFitCapacityInAnySlot = timeSlots.some((slot) => {
-    if (!canSlotFitExam(slot, exam) || hasStudentOverlap(usage, exam, slot.id)) return false;
+    if (!canSlotFitExam(slot, exam) || hasStudentOverlap(usage, exam, slot)) return false;
 
     const slotDayKey = slotDayKeys.get(slot.id);
     const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
-    const availableSupervisors = getAvailableSupervisorsForSlot(supervisors, slot, usage, slotDayKey);
+    const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey);
 
     return getTotalCapacity(availableRooms) >= exam.requiredSeats &&
-      availableSupervisors.length >= requiredSupervisors;
+      availableProctors.length >= requiredProctors;
   });
 
   if (!canFitCapacityInAnySlot) {
     return buildConflictPayload(
       scheduleId,
       'ROOM_OVERCAPACITY',
-      `No time slot has enough unused room capacity and supervisor coverage for ${examLabel}: requires ${exam.requiredSeats} seats.`,
+      `No time slot has enough unused room capacity and proctor coverage for ${examLabel}: requires ${exam.requiredSeats} seats.`,
     );
   }
 
   return buildConflictPayload(
     scheduleId,
     'RESOURCE_UNAVAILABLE',
-    `No valid assignment found for ${examLabel} after checking timeslots, rooms, supervisors, student overlaps, room reuse, and supervisor daily limits.`,
+    `No valid assignment found for ${examLabel} after checking timeslots, rooms, proctors, student overlaps, room reuse, and proctor daily limits.`,
   );
 };
 
@@ -595,124 +961,919 @@ const generatedScheduleInclude = {
         },
       },
       room: { include: { center: true } },
-      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
       timeSlot: true,
     },
   },
-  conflicts: true,
-  _count: { select: { assignments: true, conflicts: true } },
+  _count: { select: { assignments: true } },
 };
 
-const buildDemoConflictCoverage = ({ scheduleId, exams, conflictInserts, timeSlots, rooms, supervisors }) => {
-  const existingTypes = new Set(conflictInserts.map((conflict) => conflict.type));
-  const demoConflictInserts = [];
-  const examByCode = new Map(exams.map((exam) => [exam.courseCode, exam]));
-  const sortedRooms = sortRoomsByCapacityDesc(rooms);
-  const firstSlot = timeSlots[0];
-  const largestRoom = sortedRooms[0];
-  const firstSupervisor = supervisors[0];
+const orderTimeSlotsForStrategy = (timeSlots, strategyId) => {
+  const ordered = [...timeSlots];
 
-  const pushIfMissing = (type, code, descriptionBuilder) => {
-    if (existingTypes.has(type)) return;
-    const exam = examByCode.get(code);
-    if (!exam) return;
-    demoConflictInserts.push(buildConflictPayload(scheduleId, type, descriptionBuilder(exam)));
-    existingTypes.add(type);
-  };
+  if (strategyId === 'latest-slot-first') {
+    return ordered.reverse();
+  }
 
-  pushIfMissing('ROOM_OVERCAPACITY', 'DEMO-MEGA450', (exam) => {
-    const totalRoomCapacity = getTotalCapacity(rooms);
-    const roomLabel = getRoomInventoryLabel(sortedRooms);
-    return `${getExamLabel(exam)} requires ${exam.requiredSeats} seats, but the full available room inventory provides ${totalRoomCapacity}${roomLabel ? ` across rooms such as ${roomLabel}` : ''}.`;
-  });
+  if (strategyId === 'midpoint-balance') {
+    const result = [];
+    let left = 0;
+    let right = ordered.length - 1;
+    while (left <= right) {
+      if (left === right) {
+        result.push(ordered[left]);
+      } else {
+        result.push(ordered[left], ordered[right]);
+      }
+      left += 1;
+      right -= 1;
+    }
+    return result;
+  }
 
-  pushIfMissing('STUDENT_OVERLAP', 'DEMO-CS101', (exam) => {
-    const studentLabels = getSampleStudentLabels(exam);
-    return `${getExamLabel(exam)} is part of the controlled overlap group: registered students have more exams than the ${timeSlots.length} valid time slots allow${studentLabels.length ? `, including ${studentLabels.join(', ')}` : ''}.`;
-  });
-
-  pushIfMissing('SUPERVISOR_DOUBLE_BOOKED', 'DEMO-CAP499', (exam) => {
-    const supervisorLabel = getSupervisorSampleLabel(supervisors);
-    return `${getExamLabel(exam)} is part of the controlled supervisor-capacity case. The demo dataset has only ${supervisors.length} supervisors capped at one exam per day${supervisorLabel ? `, including ${supervisorLabel}` : ''}, so generation cannot cover every exam without double-booking or exceeding limits.`;
-  });
-
-  pushIfMissing('RESOURCE_UNAVAILABLE', 'DEMO-NORES510', (exam) => {
-    const requiredSups = getRequiredSupervisorCount(exam.requiredSeats);
-    const supervisorName = firstSupervisor?.user?.name;
-    return `${getExamLabel(exam)} requires ${exam.requiredSeats} students and needs ${requiredSups} supervisor${requiredSups !== 1 ? 's' : ''} (1 per ${SUPERVISOR_RATIO} students), but only ${supervisors.length} supervisor${supervisors.length !== 1 ? 's' : ''} ${supervisors.length === 1 ? 'is' : 'are'} available${supervisorName ? ` (e.g. ${supervisorName})` : ''}.`;
-  });
-
-  pushIfMissing('TIME_CONSTRAINT_VIOLATION', 'DEMO-LAB999', (exam) => {
-    return `${getExamLabel(exam)} requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but the available demo slots such as ${getSlotLabel(firstSlot)} are shorter.`;
-  });
-
-  return demoConflictInserts;
+  return ordered;
 };
 
-const runConstraintScheduling = ({ scheduleId, exams, rooms, supervisors, timeSlots, existingAssignments }) => {
-  const usage = createUsageTracker(existingAssignments);
-  const sortedRooms = sortRoomsByCapacityDesc(rooms);
+const scoreSoftCandidate = ({ exam, slot, allocation, usage, slotDayKey }) => {
+  const uniqueRooms = [...new Map(allocation.map(({ room }) => [room.id, room])).values()];
+  const totalCapacity = getTotalCapacity(uniqueRooms);
+  const unusedSeatsPenalty = Math.max(0, totalCapacity - exam.requiredSeats);
+  const roomSpreadPenalty = Math.max(0, uniqueRooms.length - 1) * 12;
+  const centerSpreadPenalty = Math.max(0, new Set(uniqueRooms.map((room) => room.centerId)).size - 1) * 25;
+  const studentDailyLoadPenalty = exam.studentIds.reduce((total, studentId) => (
+    total + ((usage.studentDailyLoadMap.get(`${studentId}:${slotDayKey}`) ?? 0) * 20)
+  ), 0);
+  const proctorDailyLoadPenalty = allocation.reduce((total, { proctor }) => (
+    total + ((usage.proctorDailyLoadMap.get(`${proctor.id}:${slotDayKey}`) ?? 0) * 10)
+  ), 0);
+
+  return unusedSeatsPenalty + roomSpreadPenalty + centerSpreadPenalty + studentDailyLoadPenalty + proctorDailyLoadPenalty;
+};
+
+const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy }) => {
+  if (!hasEnrollmentConstraintSatisfied(exam)) return [];
+
+  const fittingSlots = orderTimeSlotsForStrategy(
+    timeSlots.filter((slot) => canSlotFitExam(slot, exam)),
+    strategy.id,
+  );
+
+  const candidates = [];
+  for (const slot of fittingSlots) {
+    if (hasStudentOverlap(usage, exam, slot)) continue;
+    const slotDayKey = slotDayKeys.get(slot.id);
+    if (!hasStudentDailyLoadCapacity(usage, exam, slotDayKey)) continue;
+    const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey });
+    if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
+
+    const softPenalty = scoreSoftCandidate({ exam, slot, allocation, usage, slotDayKey });
+    candidates.push({ slot, allocation, slotDayKey, softPenalty });
+    if (strategy.earlyStopOnPerfectCandidate && softPenalty === 0) break;
+  }
+
+  return candidates.sort((a, b) => a.softPenalty - b.softPenalty || a.slot.startTime - b.slot.startTime);
+};
+
+const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, existingAssignments, lookups = null, strategy = {} }) => {
+  const usage = createUsageTracker(existingAssignments, lookups);
+  const roomSorter = strategy.roomSorter ?? sortRoomsByCapacityDesc;
+  const examComparator = strategy.examComparator ?? compareExamsForScheduling;
+  const sortedRooms = roomSorter(rooms);
   const slotDayKeys = buildSlotDayKeyMap(timeSlots);
   const assignmentInserts = [];
   const conflictInserts = [];
   const scheduledExamIds = [];
+  const candidateScores = [];
 
-  const sortedExams = [...exams].sort(compareExamsForScheduling);
+  const sortedExams = [...exams].sort(examComparator);
 
   for (const exam of sortedExams) {
-    let assignments = null;
-    const fittingSlots = timeSlots.filter((slot) => canSlotFitExam(slot, exam));
+    const candidates = buildValidCandidatesForExam({
+      exam,
+      timeSlots,
+      sortedRooms,
+      proctors,
+      usage,
+      slotDayKeys,
+      strategy,
+    });
 
-    if (fittingSlots.length === 0) {
+    if (candidates.length === 0) {
       conflictInserts.push(buildAssignmentFailureConflict({
         scheduleId,
         exam,
         timeSlots,
         sortedRooms,
-        supervisors,
+        proctors,
         usage,
         slotDayKeys,
       }));
       continue;
     }
 
-    for (const slot of fittingSlots) {
-      const slotDayKey = slotDayKeys.get(slot.id);
-      const allocation = buildRoomAllocation({ exam, slot, sortedRooms, supervisors, usage, slotDayKey });
-      if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
+    const bestCandidate = candidates[0];
+    const assignments = bestCandidate.allocation.map(({ room, proctor }) => ({
+      scheduleId,
+      examId: exam.id,
+      roomId: room.id,
+      proctorId: proctor.id,
+      timeSlotId: bestCandidate.slot.id,
+    }));
 
-      assignments = allocation.map(({ room, supervisor }) => ({
-        scheduleId,
-        examId: exam.id,
-        roomId: room.id,
-        supervisorId: supervisor.id,
-        timeSlotId: slot.id,
-      }));
-
-      for (const assignment of assignments) {
-        reserveAssignment(usage, assignment, exam, slot, slotDayKey);
-      }
-      break;
-    }
-
-    if (!assignments) {
-      conflictInserts.push(buildAssignmentFailureConflict({
-        scheduleId,
-        exam,
-        timeSlots,
-        sortedRooms,
-        supervisors,
-        usage,
-        slotDayKeys,
-      }));
-      continue;
+    for (const [index, assignment] of assignments.entries()) {
+      reserveAssignment(usage, assignment, exam, bestCandidate.slot, bestCandidate.slotDayKey, {
+        reserveStudents: index === 0,
+      });
     }
 
     assignmentInserts.push(...assignments);
     scheduledExamIds.push(exam.id);
+    candidateScores.push({
+      examId: exam.id,
+      timeSlotId: bestCandidate.slot.id,
+      roomIds: bestCandidate.allocation.map(({ room }) => room.id),
+      proctorIds: bestCandidate.allocation.map(({ proctor }) => proctor.id),
+      softPenalty: bestCandidate.softPenalty,
+    });
   }
 
-  return { assignmentInserts, conflictInserts, scheduledExamIds };
+  return {
+    assignmentInserts,
+    conflictInserts,
+    scheduledExamIds,
+    candidateScores,
+    softPenalty: candidateScores.reduce((total, score) => total + score.softPenalty, 0),
+    hardConstraintViolations: conflictInserts.length,
+    strategyId: strategy.id ?? 'greedy-priority-csp',
+    strategyLabel: strategy.label ?? 'Greedy priority CSP draft',
+  };
+};
+
+const clampScore = (value) => Math.max(0, Math.min(100, value));
+
+const roundMetric = (value) => Math.round(value * 10) / 10;
+
+const average = (values) => (values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length);
+
+const standardDeviation = (values) => {
+  if (values.length <= 1) return 0;
+  const mean = average(values);
+  return Math.sqrt(average(values.map((value) => (value - mean) ** 2)));
+};
+
+const getDayDistance = (left, right) => Math.abs(
+  (new Date(right).setHours(0, 0, 0, 0) - new Date(left).setHours(0, 0, 0, 0)) / 86400000,
+);
+
+const groupAssignmentsByExam = (assignments = []) => {
+  const groups = new Map();
+  for (const assignment of assignments) {
+    if (!groups.has(assignment.examId)) groups.set(assignment.examId, []);
+    groups.get(assignment.examId).push(assignment);
+  }
+  return groups;
+};
+
+const evaluateDraftSchedule = ({ normalized, draft }) => {
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const roomById = new Map(normalized.rooms.map((room) => [room.id, room]));
+  const proctorIds = normalized.proctors.map((proctor) => proctor.id);
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const assignmentsByExam = groupAssignmentsByExam(draft.assignmentInserts);
+
+  const roomUtilizationRatios = [];
+  const proctorWorkloads = new Map(proctorIds.map((id) => [id, 0]));
+  const studentSlotEntries = new Map();
+  const dayExamCounts = new Map();
+  const slotExamCounts = new Map();
+  let centerSpreadPenalty = 0;
+
+  for (const [examId, assignments] of assignmentsByExam.entries()) {
+    const exam = examById.get(examId);
+    const slot = slotById.get(assignments[0]?.timeSlotId);
+    if (!exam || !slot) continue;
+
+    const uniqueRooms = [...new Map(assignments
+      .map((assignment) => roomById.get(assignment.roomId))
+      .filter(Boolean)
+      .map((room) => [room.id, room])).values()];
+    const capacity = getTotalCapacity(uniqueRooms);
+    if (capacity > 0) roomUtilizationRatios.push(Math.min(1, exam.requiredSeats / capacity));
+
+    const uniqueProctorIds = new Set(assignments.map((assignment) => assignment.proctorId));
+    for (const proctorId of uniqueProctorIds) {
+      proctorWorkloads.set(proctorId, (proctorWorkloads.get(proctorId) ?? 0) + 1);
+    }
+
+    centerSpreadPenalty += Math.max(0, new Set(uniqueRooms.map((room) => room.centerId)).size - 1);
+
+    const dayKey = toDateKey(slot.date ?? slot.startTime);
+    dayExamCounts.set(dayKey, (dayExamCounts.get(dayKey) ?? 0) + 1);
+    slotExamCounts.set(slot.id, (slotExamCounts.get(slot.id) ?? 0) + 1);
+
+    for (const studentId of exam.studentIds) {
+      if (!studentSlotEntries.has(studentId)) studentSlotEntries.set(studentId, []);
+      studentSlotEntries.get(studentId).push(slot);
+    }
+  }
+
+  const roomUtilization = clampScore(average(roomUtilizationRatios) * 100);
+
+  const workloadValues = [...proctorWorkloads.values()];
+  const workloadMean = average(workloadValues);
+  const workloadStdDev = standardDeviation(workloadValues);
+  const proctorWorkloadBalance = workloadValues.length === 0
+    ? 0
+    : clampScore(100 - ((workloadStdDev / Math.max(1, workloadMean)) * 45));
+
+  const spacingScores = [];
+  const preferredSpacingScores = [];
+  for (const slots of studentSlotEntries.values()) {
+    const orderedSlots = [...slots].sort((a, b) => a.startTime - b.startTime);
+    for (let index = 1; index < orderedSlots.length; index += 1) {
+      const gapDays = getDayDistance(orderedSlots[index - 1].startTime, orderedSlots[index].startTime);
+      spacingScores.push(clampScore((gapDays / 2) * 100));
+      preferredSpacingScores.push(gapDays >= 1 ? 100 : 35);
+    }
+  }
+  const studentSpacing = spacingScores.length === 0 ? 100 : average(spacingScores);
+  const preferredSpacing = preferredSpacingScores.length === 0 ? 100 : average(preferredSpacingScores);
+
+  const distributionValues = [...dayExamCounts.values(), ...slotExamCounts.values()];
+  const distributionMean = average(distributionValues);
+  const distributionStdDev = standardDeviation(distributionValues);
+  const examDistribution = distributionValues.length === 0
+    ? 0
+    : clampScore(100 - ((distributionStdDev / Math.max(1, distributionMean)) * 35));
+
+  const centerProximity = clampScore(100 - (centerSpreadPenalty * 8));
+  const metrics = {
+    roomUtilization: roundMetric(roomUtilization),
+    proctorWorkloadBalance: roundMetric(proctorWorkloadBalance),
+    studentSpacing: roundMetric(studentSpacing),
+    examDistribution: roundMetric(examDistribution),
+    preferredSpacing: roundMetric(preferredSpacing),
+    centerProximity: roundMetric(centerProximity),
+  };
+  const score = roundMetric(
+    (metrics.roomUtilization * QUALITY_WEIGHTS.roomUtilization)
+    + (metrics.proctorWorkloadBalance * QUALITY_WEIGHTS.proctorWorkloadBalance)
+    + (metrics.studentSpacing * QUALITY_WEIGHTS.studentSpacing)
+    + (metrics.examDistribution * QUALITY_WEIGHTS.examDistribution)
+    + (metrics.preferredSpacing * QUALITY_WEIGHTS.preferredSpacing),
+  );
+
+  const weakAreas = Object.entries(metrics)
+    .filter(([, value]) => value < 75)
+    .map(([key, value]) => ({ area: key, score: value }));
+
+  return {
+    score,
+    scorePercent: `${score}%`,
+    weakAreas,
+    metrics,
+    qualityMetrics: {
+      ...metrics,
+      proctorWorkloadRange: workloadValues.length > 0
+        ? Math.max(...workloadValues) - Math.min(...workloadValues)
+        : 0,
+      averageRoomUtilization: metrics.roomUtilization,
+      examsPerDay: Object.fromEntries(dayExamCounts.entries()),
+    },
+  };
+};
+
+const withQualityEvaluation = (normalized, draft, originalEvaluation = null) => {
+  const qualityEvaluation = evaluateDraftSchedule({ normalized, draft });
+  return {
+    ...draft,
+    softPenalty: roundMetric(100 - qualityEvaluation.score),
+    qualityEvaluation,
+    ...(originalEvaluation ? { originalQualityEvaluation: originalEvaluation } : {}),
+  };
+};
+
+const createUsageFromDraft = ({ normalized, draft, excludedExamId = null }) => {
+  const usage = createUsageTracker(normalized.existingAssignments, normalized.lookups);
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const reservedStudentExamSlots = new Set();
+
+  for (const assignment of draft.assignmentInserts) {
+    if (assignment.examId === excludedExamId) continue;
+    const exam = examById.get(assignment.examId);
+    const slot = slotById.get(assignment.timeSlotId);
+    if (!exam || !slot) continue;
+    const slotDayKey = toDateKey(slot.date ?? slot.startTime);
+    const studentReservationKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    reserveAssignment(usage, assignment, exam, slot, slotDayKey, {
+      reserveStudents: !reservedStudentExamSlots.has(studentReservationKey),
+    });
+    reservedStudentExamSlots.add(studentReservationKey);
+  }
+
+  return usage;
+};
+
+const replaceExamAssignments = ({ draft, examId, candidate }) => {
+  const nextAssignments = draft.assignmentInserts.filter((assignment) => assignment.examId !== examId);
+  const replacementAssignments = candidate.allocation.map(({ room, proctor }) => ({
+    scheduleId: 'preview',
+    examId,
+    roomId: room.id,
+    proctorId: proctor.id,
+    timeSlotId: candidate.slot.id,
+  }));
+  const nextCandidateScores = draft.candidateScores.filter((score) => score.examId !== examId);
+
+  return {
+    ...draft,
+    assignmentInserts: [...nextAssignments, ...replacementAssignments],
+    candidateScores: [
+      ...nextCandidateScores,
+      {
+        examId,
+        timeSlotId: candidate.slot.id,
+        roomIds: candidate.allocation.map(({ room }) => room.id),
+        proctorIds: candidate.allocation.map(({ proctor }) => proctor.id),
+        softPenalty: candidate.softPenalty,
+      },
+    ],
+  };
+};
+
+const optimizeDraftWithLocalSearch = ({ normalized, draft, originalEvaluation }) => {
+  if (draft.conflictInserts.length > 0 || draft.scheduledExamIds.length !== normalized.exams.length) {
+    return { preview: withQualityEvaluation(normalized, draft, originalEvaluation), repairs: [] };
+  }
+
+  const slotDayKeys = buildSlotDayKeyMap(normalized.timeSlots);
+  const sortedRooms = sortRoomsByCapacityDesc(normalized.rooms);
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const mutableExams = [...normalized.exams]
+    .sort((a, b) => (draft.candidateScores.find((score) => score.examId === b.id)?.softPenalty ?? 0)
+      - (draft.candidateScores.find((score) => score.examId === a.id)?.softPenalty ?? 0))
+    .slice(0, LOCAL_SEARCH_EXAM_LIMIT);
+
+  let bestDraft = withQualityEvaluation(normalized, draft, originalEvaluation);
+  const repairs = [];
+
+  for (const exam of mutableExams) {
+    const currentScore = bestDraft.qualityEvaluation.score;
+    const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
+    const candidates = buildValidCandidatesForExam({
+      exam,
+      timeSlots: normalized.timeSlots,
+      sortedRooms,
+      proctors: normalized.proctors,
+      usage,
+      slotDayKeys,
+      strategy: { id: 'local-search-nearby' },
+    }).slice(0, LOCAL_SEARCH_CANDIDATE_LIMIT);
+
+    for (const candidate of candidates) {
+      const candidateDraft = replaceExamAssignments({ draft: bestDraft, examId: exam.id, candidate });
+      const hardIssues = confirmHybridDraft({ draft: candidateDraft, normalized });
+      if (hardIssues.length > 0) continue;
+
+      const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, originalEvaluation);
+      if (evaluatedDraft.qualityEvaluation.score > bestDraft.qualityEvaluation.score) {
+        repairs.push({
+          examId: exam.id,
+          fromScore: currentScore,
+          toScore: evaluatedDraft.qualityEvaluation.score,
+          improvement: roundMetric(evaluatedDraft.qualityEvaluation.score - currentScore),
+        });
+        bestDraft = evaluatedDraft;
+        break;
+      }
+    }
+  }
+
+  return { preview: bestDraft, repairs };
+};
+
+const BLOCKING_CATEGORY_BY_CONFLICT_TYPE = {
+  ROOM_OVERCAPACITY: 'capacity',
+  STUDENT_OVERLAP: 'studentOverlapRisks',
+  PROCTOR_DOUBLE_BOOKED: 'proctors',
+  RESOURCE_UNAVAILABLE: 'proctors',
+  TIME_CONSTRAINT_VIOLATION: 'timeSlots',
+};
+
+const EMPTY_CONSTRAINT_PREVIEW = {
+  assignmentInserts: [],
+  conflictInserts: [],
+  scheduledExamIds: [],
+  candidateScores: [],
+  softPenalty: 0,
+  hardConstraintViolations: 0,
+  strategyId: 'required-data-validation',
+  strategyLabel: 'Required data validation',
+};
+
+const buildConstraintPreview = (normalized) => {
+  return buildHybridDraft({
+    scheduleId: 'preview',
+    exams: normalized.exams,
+    rooms: normalized.rooms,
+    proctors: normalized.proctors,
+    timeSlots: normalized.timeSlots,
+    existingAssignments: normalized.existingAssignments,
+    lookups: normalized.lookups,
+  });
+};
+
+const OPTIMIZATION_STRATEGIES = [
+  {
+    id: 'largest-room-first',
+    label: 'Capacity-first room selection',
+    examComparator: compareExamsForScheduling,
+    roomSorter: sortRoomsByCapacityDesc,
+    earlyStopOnPerfectCandidate: true,
+  },
+  {
+    id: 'latest-slot-first',
+    label: 'Later-slot balancing',
+    examComparator: compareExamsForScheduling,
+    roomSorter: sortRoomsByCapacityDesc,
+    earlyStopOnPerfectCandidate: true,
+  },
+  {
+    id: 'least-constrained-first',
+    label: 'Least-constrained local reordering',
+    examComparator: compareExamsLeastConstrainedFirst,
+    roomSorter: sortRoomsByCapacityDesc,
+  },
+  {
+    id: 'priority-balance',
+    label: 'High-priority protection',
+    examComparator: compareExamsPriorityFirst,
+    roomSorter: sortRoomsByCapacityDesc,
+    earlyStopOnPerfectCandidate: true,
+  },
+  {
+    id: 'midpoint-balance',
+    label: 'Midpoint slot balance',
+    examComparator: compareExamsShortestFirst,
+    roomSorter: sortRoomsByCapacityAsc,
+  },
+];
+
+const pickBetterConstraintPreview = (left, right) => {
+  if (!left) return right;
+  if (!right) return left;
+  if (right.conflictInserts.length < left.conflictInserts.length) return right;
+  if (right.conflictInserts.length > left.conflictInserts.length) return left;
+  if (right.scheduledExamIds.length > left.scheduledExamIds.length) return right;
+  if ((right.qualityEvaluation?.score ?? 0) > (left.qualityEvaluation?.score ?? 0)) return right;
+  if ((right.softPenalty ?? 0) < (left.softPenalty ?? 0)) return right;
+  return left;
+};
+
+const optimizeHybridDraft = (normalized) => {
+  const attemptedStrategies = [];
+  const originalDraft = buildConstraintPreview(normalized);
+  const originalEvaluation = evaluateDraftSchedule({ normalized, draft: originalDraft });
+  let bestPreview = withQualityEvaluation(normalized, originalDraft, originalEvaluation);
+  let bestStrategy = {
+    id: 'greedy-priority-csp',
+    label: 'Greedy priority CSP draft',
+  };
+
+  for (const strategy of OPTIMIZATION_STRATEGIES) {
+    attemptedStrategies.push(strategy.label);
+    const preview = withQualityEvaluation(normalized, buildHybridDraft({
+      scheduleId: 'preview',
+      exams: normalized.exams,
+      rooms: normalized.rooms,
+      proctors: normalized.proctors,
+      timeSlots: normalized.timeSlots,
+      existingAssignments: normalized.existingAssignments,
+      lookups: normalized.lookups,
+      strategy,
+    }), originalEvaluation);
+
+    const betterPreview = pickBetterConstraintPreview(bestPreview, preview);
+    if (betterPreview !== bestPreview) {
+      bestPreview = preview;
+      bestStrategy = strategy;
+    }
+
+    if (preview.conflictInserts.length === 0 && preview.qualityEvaluation?.score === 100) break;
+  }
+
+  let localSearchRepairs = [];
+  if (bestPreview.conflictInserts.length === 0 && bestPreview.scheduledExamIds.length === normalized.exams.length) {
+    attemptedStrategies.push('Assignment-level local search');
+    const localSearch = optimizeDraftWithLocalSearch({
+      normalized,
+      draft: bestPreview,
+      originalEvaluation,
+    });
+    bestPreview = localSearch.preview;
+    localSearchRepairs = localSearch.repairs;
+  }
+
+  const beforeScore = originalEvaluation.score;
+  const afterScore = bestPreview.qualityEvaluation?.score ?? beforeScore;
+  const improvementPercentage = roundMetric(afterScore - beforeScore);
+
+  return {
+    attemptedStrategies,
+    optimized: bestPreview.conflictInserts.length === 0,
+    preview: bestPreview,
+    strategy: bestStrategy,
+    localSearchRepairs,
+    evaluation: {
+      beforeOptimization: originalEvaluation,
+      afterOptimization: bestPreview.qualityEvaluation,
+      improvementPercentage,
+      improvementLabel: `${improvementPercentage >= 0 ? '+' : ''}${improvementPercentage}% Improved`,
+      weakAreas: originalEvaluation.weakAreas,
+      qualityMetrics: bestPreview.qualityEvaluation?.qualityMetrics ?? originalEvaluation.qualityMetrics,
+    },
+  };
+};
+
+const confirmHybridDraft = ({ draft, normalized }) => {
+  const issues = [];
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const roomById = new Map(normalized.rooms.map((room) => [room.id, room]));
+  const proctorById = new Map(normalized.proctors.map((proctor) => [proctor.id, proctor]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const roomTimeMap = new Map();
+  const roomTimeRangeMap = new Map();
+  const proctorTimeMap = new Map();
+  const proctorTimeRangeMap = new Map();
+  const studentTimeMap = new Map();
+  const studentTimeRangeMap = new Map();
+  const studentDayExamMap = new Map();
+  const proctorDayExamMap = new Map();
+  const examSlotCapacity = new Map();
+  const examSlotProctors = new Map();
+
+  const hasDraftTemporalOverlap = (rangeMap, entityId, slot, examId) => {
+    if (!slot.startTime || !slot.endTime) return false;
+    return (rangeMap.get(entityId) ?? []).some((range) => (
+      range.examId !== examId && timeRangesOverlap(slot.startTime, slot.endTime, range.start, range.end)
+    ));
+  };
+
+  const addDraftTimeRange = (rangeMap, entityId, slot, examId) => {
+    if (!slot.startTime || !slot.endTime) return;
+    const ranges = rangeMap.get(entityId) ?? [];
+    ranges.push({ start: slot.startTime, end: slot.endTime, examId });
+    rangeMap.set(entityId, ranges);
+  };
+
+  if (draft.conflictInserts.length > 0) {
+    issues.push('The optimized draft still contains blocking hard-constraint issues.');
+  }
+
+  if (new Set(draft.scheduledExamIds).size !== normalized.exams.length) {
+    issues.push('The optimized draft does not assign every active exam.');
+  }
+
+  for (const assignment of draft.assignmentInserts) {
+    const exam = examById.get(assignment.examId);
+    const room = roomById.get(assignment.roomId);
+    const proctor = proctorById.get(assignment.proctorId);
+    const slot = slotById.get(assignment.timeSlotId);
+    if (!exam || !room || !proctor || !slot) {
+      issues.push('The optimized draft references a missing exam, room, proctor, or time slot.');
+      continue;
+    }
+
+    const slotDayKey = toDateKey(slot.date ?? slot.startTime);
+
+    if (exam.studentCount <= 0 || exam.studentIds.length === 0) {
+      issues.push('An exam without enrollments is present in the optimized draft.');
+    }
+
+    if (!canSlotFitExam(slot, exam)) {
+      issues.push('A selected time slot does not fit the exam duration or has invalid dates.');
+    }
+
+    if (room.status !== 'AVAILABLE') {
+      issues.push('A selected room is not available.');
+    }
+
+    if (room.centerId !== proctor.centerId) {
+      issues.push('A selected proctor is assigned outside the room center.');
+    }
+
+    if (!proctor.availableTimeSlotIds?.has(slot.id)) {
+      issues.push('A selected proctor is not available in the assigned time slot.');
+    }
+
+    const roomTimeKey = `${assignment.roomId}:${assignment.timeSlotId}`;
+    const priorRoomExamId = roomTimeMap.get(roomTimeKey);
+    if (priorRoomExamId && priorRoomExamId !== assignment.examId) {
+      issues.push('A room is assigned to more than one exam in the same time slot.');
+    }
+    if (hasDraftTemporalOverlap(roomTimeRangeMap, assignment.roomId, slot, assignment.examId)) {
+      issues.push('A room is assigned to overlapping exam times.');
+    }
+    roomTimeMap.set(roomTimeKey, assignment.examId);
+    addDraftTimeRange(roomTimeRangeMap, assignment.roomId, slot, assignment.examId);
+
+    const proctorTimeKey = `${assignment.proctorId}:${assignment.timeSlotId}`;
+    const priorProctorExamId = proctorTimeMap.get(proctorTimeKey);
+    if (priorProctorExamId && priorProctorExamId !== assignment.examId) {
+      issues.push('A proctor is assigned to more than one exam in the same time slot.');
+    }
+    if (hasDraftTemporalOverlap(proctorTimeRangeMap, assignment.proctorId, slot, assignment.examId)) {
+      issues.push('A proctor is assigned to overlapping exam times.');
+    }
+    proctorTimeMap.set(proctorTimeKey, assignment.examId);
+    addDraftTimeRange(proctorTimeRangeMap, assignment.proctorId, slot, assignment.examId);
+
+    const proctorDayKey = `${assignment.proctorId}:${slotDayKey}`;
+    const proctorDaySet = proctorDayExamMap.get(proctorDayKey) ?? new Set();
+    proctorDaySet.add(assignment.examId);
+    proctorDayExamMap.set(proctorDayKey, proctorDaySet);
+    if (proctorDaySet.size > proctor.maxExamsPerDay) {
+      issues.push('A proctor exceeds their maximum exams per day.');
+    }
+
+    const examSlotKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    const capacityGroup = examSlotCapacity.get(examSlotKey) ?? { roomIds: new Set(), capacity: 0, requiredSeats: exam.requiredSeats };
+    if (!capacityGroup.roomIds.has(room.id)) {
+      capacityGroup.roomIds.add(room.id);
+      capacityGroup.capacity += room.capacity;
+    }
+    examSlotCapacity.set(examSlotKey, capacityGroup);
+    const proctorGroup = examSlotProctors.get(examSlotKey) ?? new Set();
+    proctorGroup.add(assignment.proctorId);
+    examSlotProctors.set(examSlotKey, proctorGroup);
+
+    for (const studentId of exam.studentIds) {
+      const studentTimeKey = `${studentId}:${assignment.timeSlotId}`;
+      const priorStudentExamId = studentTimeMap.get(studentTimeKey);
+      if (priorStudentExamId && priorStudentExamId !== assignment.examId) {
+        issues.push('A student has more than one exam in the same time slot.');
+      }
+      if (hasDraftTemporalOverlap(studentTimeRangeMap, studentId, slot, assignment.examId)) {
+        issues.push('A student is assigned to overlapping exam times.');
+      }
+      studentTimeMap.set(studentTimeKey, assignment.examId);
+      addDraftTimeRange(studentTimeRangeMap, studentId, slot, assignment.examId);
+
+      const studentDayKey = `${studentId}:${slotDayKey}`;
+      const studentDaySet = studentDayExamMap.get(studentDayKey) ?? new Set();
+      studentDaySet.add(assignment.examId);
+      studentDayExamMap.set(studentDayKey, studentDaySet);
+      if (studentDaySet.size > MAX_STUDENT_EXAMS_PER_DAY) {
+        issues.push('A student exceeds the maximum exams per day.');
+      }
+    }
+  }
+
+  for (const [examSlotKey, { capacity, requiredSeats }] of examSlotCapacity.entries()) {
+    if (capacity < requiredSeats) {
+      issues.push('An exam assignment does not meet required room capacity.');
+    }
+    const [examId] = examSlotKey.split(':');
+    const exam = examById.get(examId);
+    if (exam && (examSlotProctors.get(examSlotKey)?.size ?? 0) < getRequiredProctorsForExam(exam)) {
+      issues.push('An exam assignment does not meet the required proctor count.');
+    }
+  }
+
+  return dedupeIssues(issues);
+};
+
+const buildBlockingIssuesFromConflicts = (conflictInserts = []) => {
+  const grouped = {};
+
+  for (const conflict of conflictInserts) {
+    const key = BLOCKING_CATEGORY_BY_CONFLICT_TYPE[conflict.type] ?? 'capacity';
+    if (!grouped[key]) grouped[key] = [];
+    if (!grouped[key].includes(conflict.description)) {
+      grouped[key].push(conflict.description);
+    }
+  }
+
+  return grouped;
+};
+
+const dedupeIssues = (issues = []) => [...new Set(issues.filter(Boolean))];
+
+const collectPreValidationState = async ({ normalized, semester, constraintPreview = null, includeConstraintPreview = true }) => {
+  const groups = {
+    rooms: [],
+    proctors: [],
+    timeSlots: [],
+    courseOfferings: [],
+    enrollments: [],
+    studentOverlapRisks: [],
+  };
+  const warnings = [];
+
+  if (normalized.rooms.length === 0) {
+    groups.rooms.push('No rooms are marked as Available. Mark at least one room as Available before generating.');
+  }
+
+  if (normalized.proctors.length === 0) {
+    groups.proctors.push('No proctors are registered. Add at least one proctor before generating.');
+  }
+
+  if (normalized.timeSlots.length === 0) {
+    const semRange = `${fmtDate(semester.startDate)} – ${fmtDate(semester.endDate)}`;
+    groups.timeSlots.push(
+      `No time slots fall within the "${semester.name}" period (${semRange}). Create time slots with dates inside this range.`,
+    );
+  }
+
+  if (normalized.timeSlots.some((slot) => !hasValidTimeSlotWindow(slot))) {
+    groups.timeSlots.push(
+      'One or more time slots are invalid. Each time slot must have a valid date, start time, end time, and positive duration before generating.',
+    );
+  }
+
+  if (normalized.exams.length === 0) {
+    groups.courseOfferings.push(`No active course offerings found for "${semester.name}". Activate or add offerings for this semester.`);
+  }
+
+  const emptyOfferings = normalized.exams.filter((exam) => exam.studentCount === 0);
+  for (const exam of emptyOfferings) {
+    const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+    groups.enrollments.push(`"${label}" has no enrolled students. Add at least one enrollment before generating.`);
+  }
+
+  const supervisedRooms = sortRoomsByCapacityDesc(normalized.rooms).slice(0, normalized.proctors.length);
+  const supervisedCapacity = getTotalCapacity(supervisedRooms);
+
+  if (normalized.proctors.length > 0 && normalized.rooms.length > 0 && supervisedCapacity === 0) {
+    warnings.push('All available rooms report zero capacity. Resolve room setup before attempting generation.');
+  }
+
+  for (const exam of normalized.exams) {
+    const examLabel = getExamLabel(exam);
+    const fittingSlotCount = normalized.timeSlots.filter((slot) => canSlotFitExam(slot, exam)).length;
+    if (fittingSlotCount === 0) {
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      warnings.push(
+        `"${courseLabel}" does not fit any currently valid time slot and will be reported as a blocking issue.`,
+      );
+    }
+
+    const maxSlotCapacity = Math.max(0, ...normalized.lookups.timeslotCapacityMap.values());
+    if (maxSlotCapacity < exam.requiredSeats) {
+      groups.courseOfferings.push(`${examLabel} requires ${exam.requiredSeats} seats, but available room capacity supports at most ${maxSlotCapacity} seats in a time slot.`);
+    }
+
+    const requiredProctors = getRequiredProctorsForExam(exam);
+    const maxProctorCoverage = normalized.timeSlots.reduce((max, slot) => {
+      if (!canSlotFitExam(slot, exam)) return max;
+      const availableCount = normalized.proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id)).length;
+      return Math.max(max, availableCount);
+    }, 0);
+    if (maxProctorCoverage < requiredProctors) {
+      groups.proctors.push(`${examLabel} needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''}, but the strongest valid time slot has only ${maxProctorCoverage} available proctor${maxProctorCoverage !== 1 ? 's' : ''}.`);
+    }
+
+    if (supervisedCapacity < exam.requiredSeats) {
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      warnings.push(
+        `"${courseLabel}" needs ${exam.requiredSeats} seats and ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} for ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''}; current resources may be insufficient.`,
+      );
+    }
+  }
+
+  const allStudentIds = [...normalized.studentToExams.keys()];
+  const studentUserMap = new Map();
+  if (allStudentIds.length > 0) {
+    const students = await prisma.student.findMany({
+      where: { id: { in: allStudentIds } },
+      select: { id: true, user: { select: { name: true, email: true } } },
+    });
+    for (const student of students) studentUserMap.set(student.id, student.user);
+  }
+
+  for (const [studentId, examIds] of normalized.studentToExams.entries()) {
+    if (examIds.size > normalized.timeSlots.length && normalized.timeSlots.length > 0) {
+      const user = studentUserMap.get(studentId);
+      const studentLabel = user?.name
+        ? user.email ? `${user.name} (${user.email})` : user.name
+        : 'a student';
+      warnings.push(
+        `${studentLabel} has ${examIds.size} exams but only ${normalized.timeSlots.length} time slots in "${semester.name}".`,
+      );
+    }
+  }
+
+  const preview = includeConstraintPreview
+    ? (constraintPreview ?? optimizeHybridDraft(normalized).preview)
+    : EMPTY_CONSTRAINT_PREVIEW;
+  const blockingIssues = includeConstraintPreview
+    ? buildBlockingIssuesFromConflicts(preview.conflictInserts)
+    : {};
+
+  for (const [category, issues] of Object.entries(blockingIssues)) {
+    if (category === 'proctors') {
+      groups.proctors.push(...issues);
+      continue;
+    }
+    if (category === 'timeSlots') {
+      groups.timeSlots.push(...issues);
+      continue;
+    }
+    if (category === 'studentOverlapRisks') {
+      groups.studentOverlapRisks.push(...issues);
+      continue;
+    }
+    groups.courseOfferings.push(...issues);
+  }
+
+  for (const key of Object.keys(groups)) {
+    groups[key] = dedupeIssues(groups[key]);
+  }
+
+  return {
+    groups,
+    warnings: dedupeIssues(warnings),
+    constraintPreview: preview,
+  };
+};
+
+const buildValidationResponse = ({ normalized, semester, groups, warnings, constraintPreview, optimization = undefined }) => {
+  const allIssues = [
+    ...groups.rooms,
+    ...groups.proctors,
+    ...groups.timeSlots,
+    ...groups.courseOfferings,
+    ...groups.enrollments,
+    ...groups.studentOverlapRisks,
+  ];
+
+  return {
+    ready: allIssues.length === 0,
+    isValid: allIssues.length === 0,
+    semester: { name: semester.name },
+    metrics: {
+      roomsCount: normalized.rooms.length,
+      proctorsCount: normalized.proctors.length,
+      examsCount: normalized.exams.length,
+      timeSlotsCount: normalized.timeSlots.length,
+      studentsWithExamsCount: normalized.studentToExams.size,
+      existingAssignmentsCount: normalized.existingAssignments.length,
+      schedulableExamsCount: constraintPreview.scheduledExamIds.length,
+      blockingIssuesCount: constraintPreview.conflictInserts.length,
+      softPenalty: constraintPreview.softPenalty ?? 0,
+      qualityScore: constraintPreview.qualityEvaluation?.score ?? 0,
+    },
+    algorithm: {
+      type: HYBRID_ALGORITHM_TYPE,
+      pipeline: PIPELINE_STAGES,
+      strategy: constraintPreview.strategyLabel,
+      usesBruteForce: false,
+      lookupTables: [
+        'studentExamMap',
+        'proctorAvailabilityMap',
+        'studentDailyLoadMap',
+        'roomSlotMap',
+        'studentTimeMap',
+        'roomUsageMap',
+        'roomAvailabilityMap',
+        'timeslotCapacityMap',
+      ],
+    },
+    warnings,
+    errors: {
+      ...(groups.rooms.length > 0 ? { rooms: groups.rooms } : {}),
+      ...(groups.proctors.length > 0 ? { proctors: groups.proctors } : {}),
+      ...(groups.timeSlots.length > 0 ? { timeSlots: groups.timeSlots } : {}),
+      ...(groups.courseOfferings.length > 0 ? { courseOfferings: groups.courseOfferings } : {}),
+      ...(groups.enrollments.length > 0 ? { enrollments: groups.enrollments } : {}),
+      ...(groups.studentOverlapRisks.length > 0 ? { studentOverlapRisks: groups.studentOverlapRisks } : {}),
+    },
+    riskAnalysis: {
+      blocking: constraintPreview.conflictInserts,
+      blockingCount: constraintPreview.conflictInserts.length,
+      schedulableExamsCount: constraintPreview.scheduledExamIds.length,
+      totalExamsCount: normalized.exams.length,
+      softPenalty: constraintPreview.softPenalty ?? 0,
+      qualityEvaluation: constraintPreview.qualityEvaluation ?? null,
+    },
+    quality: {
+      originalScore: constraintPreview.originalQualityEvaluation?.score ?? constraintPreview.qualityEvaluation?.score ?? 0,
+      optimizedScore: constraintPreview.qualityEvaluation?.score ?? 0,
+      weakAreas: constraintPreview.originalQualityEvaluation?.weakAreas ?? constraintPreview.qualityEvaluation?.weakAreas ?? [],
+      qualityMetrics: constraintPreview.qualityEvaluation?.qualityMetrics ?? {},
+    },
+    groups: {
+      rooms: { ok: groups.rooms.length === 0, issues: groups.rooms },
+      proctors: { ok: groups.proctors.length === 0, issues: groups.proctors },
+      timeSlots: { ok: groups.timeSlots.length === 0, issues: groups.timeSlots },
+      courseOfferings: { ok: groups.courseOfferings.length === 0, issues: groups.courseOfferings },
+      enrollments: { ok: groups.enrollments.length === 0, issues: groups.enrollments },
+      studentOverlapRisks: { ok: groups.studentOverlapRisks.length === 0, issues: groups.studentOverlapRisks },
+    },
+    issues: allIssues,
+    ...(optimization ? { optimization } : {}),
+  };
 };
 
 export const prepareScheduling = async (data) => {
@@ -752,7 +1913,7 @@ export const prepareScheduling = async (data) => {
       courseOfferings: normalized.exams.length,
       exams: normalized.exams.length,
       rooms: normalized.rooms.length,
-      supervisors: normalized.supervisors.length,
+      proctors: normalized.proctors.length,
       timeSlotsInWindow: filteredTimeSlots.length,
       existingAssignments: normalized.existingAssignments.length,
       studentsWithExams: normalized.studentToExams.size,
@@ -767,186 +1928,206 @@ const fmtDate = (d) =>
 
 export const validateInput = async (data) => {
   const { normalized, semester } = await fetchSchedulingData(data.semesterId);
+  const { groups: g, warnings, constraintPreview } = await collectPreValidationState({
+    normalized,
+    semester,
+    includeConstraintPreview: false,
+  });
 
-  // ── Group buckets ────────────────────────────────────────────────
-  const g = {
-    rooms: [],
-    supervisors: [],
-    timeSlots: [],
-    courseOfferings: [],
-    studentOverlapRisks: [],
-  };
-  const warnings = [];
-
-  // ── Rooms ───────────────────────────────────────────────────────
-  if (normalized.rooms.length === 0) {
-    g.rooms.push('No rooms are marked as Available. Mark at least one room as Available before generating.');
-  }
-
-  // ── Supervisors ─────────────────────────────────────────────────
-  if (normalized.supervisors.length === 0) {
-    g.supervisors.push('No supervisors are registered. Add at least one supervisor before generating.');
-  }
-
-  // ── Time slots ──────────────────────────────────────────────────
-  if (normalized.timeSlots.length === 0) {
-    const semRange = `${fmtDate(semester.startDate)} – ${fmtDate(semester.endDate)}`;
-    g.timeSlots.push(
-      `No time slots fall within the "${semester.name}" period (${semRange}). Create time slots with dates inside this range.`,
-    );
-  }
-  for (const slot of normalized.timeSlots) {
-    if (slot.endTime <= slot.startTime) {
-      warnings.push('One or more time slots have an end time before their start time. Generation will save a time-constraint conflict if a slot cannot be used.');
-    }
-    break; // deduplicate: one message is enough
-  }
-
-  // ── Course offerings ─────────────────────────────────────────────
-  if (normalized.exams.length === 0) {
-    g.courseOfferings.push(`No active course offerings found for "${semester.name}". Activate or add offerings for this semester.`);
-  }
-
-  const emptyOfferings = normalized.exams.filter((e) => e.studentCount === 0);
-  for (const exam of emptyOfferings) {
-    const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
-    warnings.push(
-      `"${label}" has no enrolled students and will be skipped if it cannot be scheduled.`,
-    );
-  }
-
-  const supervisedRooms = sortRoomsByCapacityDesc(normalized.rooms).slice(0, normalized.supervisors.length);
-  const supervisedCapacity = getTotalCapacity(supervisedRooms);
-
-  if (normalized.supervisors.length > 0 && normalized.rooms.length > 0 && supervisedCapacity === 0) {
-    warnings.push('All available rooms report zero capacity. Generation will save resource or capacity conflicts if exams cannot be assigned.');
-  }
-
-  for (const exam of normalized.exams) {
-    const fittingSlotCount = normalized.timeSlots.filter((slot) => canSlotFitExam(slot, exam)).length;
-    if (fittingSlotCount === 0) {
-      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
-      warnings.push(
-        `"${courseLabel}" requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but none of the ${normalized.timeSlots.length} available time slots are long enough. Generation will save a time-constraint conflict for this exam.`,
-      );
-    }
-
-    if (supervisedCapacity < exam.requiredSeats) {
-      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
-      const needed = getRequiredSupervisorCount(exam.requiredSeats);
-      warnings.push(
-        `"${courseLabel}" requires ${exam.requiredSeats} seats and ${needed} supervisor${needed !== 1 ? 's' : ''} but available resources may be insufficient. Generation will save a conflict if it cannot be assigned.`,
-      );
-    }
-  }
-
-  // ── Student overlap risks ────────────────────────────────────────
-  const allStudentIds = [...normalized.studentToExams.keys()];
-  const studentUserMap = new Map();
-  if (allStudentIds.length > 0) {
-    const students = await prisma.student.findMany({
-      where: { id: { in: allStudentIds } },
-      select: { id: true, user: { select: { name: true, email: true } } },
-    });
-    for (const s of students) studentUserMap.set(s.id, s.user);
-  }
-
-  for (const [studentId, examIds] of normalized.studentToExams.entries()) {
-    if (examIds.size > normalized.timeSlots.length && normalized.timeSlots.length > 0) {
-      const user = studentUserMap.get(studentId);
-      const studentLabel = user?.name
-        ? user.email ? `${user.name} (${user.email})` : user.name
-        : `a student`;
-      const semesterName = semester.name;
-      warnings.push(
-        `${studentLabel} has ${examIds.size} exams but only ${normalized.timeSlots.length} time slots in "${semesterName}" — generation will save a student overlap conflict if needed.`,
-      );
-    }
-  }
-
-  // ── Flatten for backward compat ──────────────────────────────────
-  const allIssues = [
-    ...g.rooms,
-    ...g.supervisors,
-    ...g.timeSlots,
-    ...g.courseOfferings,
-    ...g.studentOverlapRisks,
-  ];
-
-  return {
-    ready: allIssues.length === 0,
-    semester: { name: semester.name },
-    metrics: {
-      roomsCount: normalized.rooms.length,
-      supervisorsCount: normalized.supervisors.length,
-      examsCount: normalized.exams.length,
-      timeSlotsCount: normalized.timeSlots.length,
-      studentsWithExamsCount: normalized.studentToExams.size,
-      existingAssignmentsCount: normalized.existingAssignments.length,
-    },
+  return buildValidationResponse({
+    normalized,
+    semester,
+    groups: g,
     warnings,
-    groups: {
-      rooms: { ok: g.rooms.length === 0, issues: g.rooms },
-      supervisors: { ok: g.supervisors.length === 0, issues: g.supervisors },
-      timeSlots: { ok: g.timeSlots.length === 0, issues: g.timeSlots },
-      courseOfferings: { ok: g.courseOfferings.length === 0, issues: g.courseOfferings },
-      studentOverlapRisks: { ok: g.studentOverlapRisks.length === 0, issues: g.studentOverlapRisks },
+    constraintPreview,
+  });
+};
+
+export const optimizeScheduling = async (data) => {
+  const { normalized, semester } = await fetchSchedulingData(data.semesterId);
+  const baseState = await collectPreValidationState({ normalized, semester, includeConstraintPreview: false });
+
+  const requiredDataIssueCount = [
+    ...baseState.groups.rooms,
+    ...baseState.groups.proctors,
+    ...baseState.groups.timeSlots,
+    ...baseState.groups.courseOfferings,
+    ...baseState.groups.enrollments,
+  ].length;
+
+  if (requiredDataIssueCount > 0) {
+    return buildValidationResponse({
+      normalized,
+      semester,
+      groups: baseState.groups,
+      warnings: baseState.warnings,
+      constraintPreview: EMPTY_CONSTRAINT_PREVIEW,
+      optimization: {
+        attempted: false,
+        optimized: false,
+        attemptedStrategies: [],
+        message: 'Optimization cannot proceed because required data validation already shows the schedule is impossible with the current resources.',
+      },
+    });
+  }
+
+  const optimizationAttempt = optimizeHybridDraft(normalized);
+  const nextState = await collectPreValidationState({
+    normalized,
+    semester,
+    constraintPreview: optimizationAttempt.preview,
+  });
+
+  return buildValidationResponse({
+    normalized,
+    semester,
+    groups: nextState.groups,
+    warnings: nextState.warnings,
+    constraintPreview: nextState.constraintPreview,
+    optimization: {
+      attempted: true,
+      optimized: optimizationAttempt.optimized,
+      strategy: optimizationAttempt.strategy.label,
+      attemptedStrategies: optimizationAttempt.attemptedStrategies,
+      softPenalty: optimizationAttempt.preview.softPenalty ?? 0,
+      beforeScore: optimizationAttempt.evaluation.beforeOptimization.score,
+      afterScore: optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score,
+      beforeQualityMetrics: optimizationAttempt.evaluation.beforeOptimization.qualityMetrics,
+      improvementPercentage: optimizationAttempt.evaluation.improvementPercentage,
+      improvementLabel: optimizationAttempt.evaluation.improvementLabel,
+      weakAreas: optimizationAttempt.evaluation.weakAreas,
+      qualityMetrics: optimizationAttempt.evaluation.qualityMetrics,
+      localSearchRepairs: optimizationAttempt.localSearchRepairs,
+      message: optimizationAttempt.optimized
+        ? `Optimization confirmed a clean allocation using: ${optimizationAttempt.strategy.label}. Before: ${optimizationAttempt.evaluation.beforeOptimization.score}%. After: ${optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score}%. ${optimizationAttempt.evaluation.improvementLabel}`
+        : `Optimization evaluated ${optimizationAttempt.attemptedStrategies.length} bounded strateg${optimizationAttempt.attemptedStrategies.length === 1 ? 'y' : 'ies'} but blocking issues remain.`,
     },
-    // flat list kept for backward compat
-    issues: allIssues,
-  };
+  });
 };
 
 export const generateSchedule = async (data) => {
   const { semesterId, scheduleName } = data;
-  const { normalized, createdExamCount } = await fetchSchedulingData(semesterId, { ensureExams: true });
+  const { normalized, semester } = await fetchSchedulingData(semesterId);
 
   if (
     normalized.rooms.length === 0
-    || normalized.supervisors.length === 0
+    || normalized.proctors.length === 0
     || normalized.timeSlots.length === 0
     || normalized.exams.length === 0
   ) {
-    throw new AppError('Insufficient scheduling resources. Run validate-input first.', 400);
+    throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
+  }
+
+  const requiredDataState = await collectPreValidationState({
+    normalized,
+    semester,
+    includeConstraintPreview: false,
+  });
+  const requiredDataBlockingIssueCount = [
+    ...requiredDataState.groups.rooms,
+    ...requiredDataState.groups.proctors,
+    ...requiredDataState.groups.timeSlots,
+    ...requiredDataState.groups.courseOfferings,
+    ...requiredDataState.groups.enrollments,
+  ].length;
+
+  if (requiredDataBlockingIssueCount > 0) {
+    throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
+  }
+
+  const optimizationAttempt = optimizeHybridDraft(normalized);
+  const { groups, constraintPreview } = await collectPreValidationState({
+    normalized,
+    semester,
+    constraintPreview: optimizationAttempt.preview,
+  });
+  const blockingIssueCount = [
+    ...groups.rooms,
+    ...groups.proctors,
+    ...groups.timeSlots,
+    ...groups.courseOfferings,
+    ...groups.enrollments,
+    ...groups.studentOverlapRisks,
+  ].length;
+
+  const effectivePreview = constraintPreview;
+  const remainingBlockingIssueCount = blockingIssueCount;
+
+  if (remainingBlockingIssueCount > 0 || effectivePreview.conflictInserts.length > 0) {
+    throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
+  }
+
+  if (effectivePreview.scheduledExamIds.length !== normalized.exams.length) {
+    throw new AppError(
+      NO_VALID_SCHEDULE_MESSAGE,
+      400,
+    );
+  }
+
+  const confirmationIssues = confirmHybridDraft({ draft: effectivePreview, normalized });
+  if (confirmationIssues.length > 0) {
+    throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
 
   const result = await prisma.$transaction(async (tx) => {
+    const draftExamIdToPersistedId = new Map(
+      normalized.exams
+        .filter((exam) => exam.persistedExamId)
+        .map((exam) => [exam.id, exam.persistedExamId]),
+    );
+    const missingExamDrafts = normalized.exams.filter((exam) => !exam.persistedExamId);
+    for (const exam of missingExamDrafts) {
+      const createdExam = await tx.exam.create({
+        data: {
+          courseOfferingId: exam.courseOfferingId,
+          status: 'DRAFT',
+          duration: exam.duration ?? DEFAULT_EXAM_DURATION,
+        },
+      });
+      draftExamIdToPersistedId.set(exam.id, createdExam.id);
+    }
+
     const schedule = await tx.schedule.create({
-      data: { name: scheduleName, isFinal: false },
+      data: {
+        name: scheduleName,
+        isFinal: false,
+        algorithmType: HYBRID_ALGORITHM_TYPE,
+        generationStage: GENERATION_STAGE.GENERATED,
+        qualityScore: effectivePreview.qualityEvaluation?.score ?? Math.max(0, 100 - (effectivePreview.softPenalty ?? 0)),
+        hardConstraintScore: 0,
+        softConstraintScore: Math.round(effectivePreview.softPenalty ?? 0),
+        algorithmMetadata: {
+          pipeline: PIPELINE_STAGES,
+          strategy: effectivePreview.strategyLabel,
+          attemptedStrategies: optimizationAttempt.attemptedStrategies,
+          lookupTables: [
+            'studentExamMap',
+            'proctorAvailabilityMap',
+            'studentDailyLoadMap',
+            'roomSlotMap',
+            'studentTimeMap',
+            'roomUsageMap',
+            'roomAvailabilityMap',
+            'timeslotCapacityMap',
+          ],
+          bruteForce: false,
+          createdExamCount: missingExamDrafts.length,
+          evaluation: optimizationAttempt.evaluation,
+          localSearchRepairs: optimizationAttempt.localSearchRepairs,
+        },
+      },
     });
 
-    const { assignmentInserts, conflictInserts, scheduledExamIds } = runConstraintScheduling({
+    const assignmentInserts = effectivePreview.assignmentInserts.map((assignment) => ({
+      ...assignment,
       scheduleId: schedule.id,
-      exams: normalized.exams,
-      rooms: normalized.rooms,
-      supervisors: normalized.supervisors,
-      timeSlots: normalized.timeSlots,
-      existingAssignments: normalized.existingAssignments,
-    });
-
-    const conflictRows = [
-      ...conflictInserts,
-      ...buildDemoConflictCoverage({
-        scheduleId: schedule.id,
-        exams: normalized.exams,
-        conflictInserts,
-        timeSlots: normalized.timeSlots,
-        rooms: normalized.rooms,
-        supervisors: normalized.supervisors,
-      }),
-    ];
+      examId: draftExamIdToPersistedId.get(assignment.examId) ?? assignment.examId,
+    }));
+    const scheduledExamIds = [...effectivePreview.scheduledExamIds]
+      .map((examId) => draftExamIdToPersistedId.get(examId) ?? examId);
 
     if (assignmentInserts.length > 0) {
       await tx.examAssignment.createMany({ data: assignmentInserts });
-    }
-
-    if (conflictRows.length > 0) {
-      await tx.conflict.createMany({
-        data: conflictRows.map((conflict) => ({
-          ...conflict,
-          resolved: false,
-        })),
-      });
     }
 
     if (scheduledExamIds.length > 0) {
@@ -963,50 +2144,33 @@ export const generateSchedule = async (data) => {
 
     if (!fullSchedule) throw new AppError('Generated schedule could not be loaded', 500);
 
-    return { fullSchedule, assignmentInserts, conflictInserts: conflictRows, generatedFailureCount: conflictInserts.length, scheduledExamIds };
+    return {
+      fullSchedule,
+      assignmentInserts,
+      scheduledExamIds,
+    };
   });
 
-  const { fullSchedule, assignmentInserts, generatedFailureCount, scheduledExamIds } = result;
-  const conflictTypesFound = [...new Set(fullSchedule.conflicts.map((conflict) => conflict.type))].sort();
-  const missingRequiredConflictTypes = REQUIRED_CONFLICT_TYPES.filter((type) => !conflictTypesFound.includes(type));
-  const requiredConflictWarnings = missingRequiredConflictTypes.map((type) => {
-    const labels = {
-      ROOM_OVERCAPACITY: 'The overcapacity course did not produce a ROOM_OVERCAPACITY conflict.',
-      STUDENT_OVERLAP: 'The controlled student overlap group did not produce a STUDENT_OVERLAP conflict.',
-      SUPERVISOR_DOUBLE_BOOKED: 'The limited supervisor capacity case did not produce a SUPERVISOR_DOUBLE_BOOKED conflict.',
-      RESOURCE_UNAVAILABLE: 'The no-valid-resource-combination case did not produce a RESOURCE_UNAVAILABLE conflict.',
-      TIME_CONSTRAINT_VIOLATION: 'The long-duration exam did not produce a TIME_CONSTRAINT_VIOLATION conflict.',
-    };
-    return labels[type] ?? `${type} was not produced by the demo scheduling test cases.`;
-  });
-  const summary = {
-    totalExams: normalized.exams.length,
-    assignedCount: scheduledExamIds.length,
-    conflictCount: fullSchedule.conflicts.length,
-    conflictTypesFound,
-    missingRequiredConflictTypes,
-    assignedExams: scheduledExamIds.length,
-    unassignedExams: generatedFailureCount,
-    assignmentRows: assignmentInserts.length,
-    conflicts: fullSchedule.conflicts.length,
-    createdExamRecords: createdExamCount,
-    existingAssignments: normalized.existingAssignments.length,
-    lockedFinalAssignments: normalized.existingAssignments.filter((assignment) => assignment.schedule?.isFinal).length,
-    studentsWithExams: normalized.studentToExams.size,
-    warnings: requiredConflictWarnings,
-  };
+  const { fullSchedule, assignmentInserts } = result;
 
   return {
     scheduleId: fullSchedule.id,
     scheduleName,
     schedule: fullSchedule,
-    summary,
-    assignedExams: summary.assignedExams,
-    unassignedExams: summary.unassignedExams,
-    totalExams: summary.totalExams,
-    diagnostics: summary,
-    warning: missingRequiredConflictTypes.length > 0 ? requiredConflictWarnings.join(' ') : undefined,
-    message: `Schedule generated with ${summary.assignedExams}/${summary.totalExams} exams assigned and ${summary.conflictCount} saved conflicts.`,
+    assignmentsCount: assignmentInserts.length,
+    message: 'Schedule generated successfully by the hybrid constraint-based engine with all hard constraints satisfied.',
+    algorithm: {
+      type: HYBRID_ALGORITHM_TYPE,
+      pipeline: PIPELINE_STAGES,
+      strategy: effectivePreview.strategyLabel,
+      softPenalty: effectivePreview.softPenalty ?? 0,
+      beforeScore: optimizationAttempt.evaluation.beforeOptimization.score,
+      afterScore: optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score,
+      improvementPercentage: optimizationAttempt.evaluation.improvementPercentage,
+      improvementLabel: optimizationAttempt.evaluation.improvementLabel,
+      weakAreas: optimizationAttempt.evaluation.weakAreas,
+      qualityMetrics: optimizationAttempt.evaluation.qualityMetrics,
+    },
   };
 };
 
@@ -1014,7 +2178,6 @@ export const getScheduleAnalysis = async (scheduleId) => {
   const schedule = await prisma.schedule.findUnique({
     where: { id: scheduleId },
     include: {
-      conflicts: true,
       assignments: {
         include: {
           exam: {
@@ -1029,7 +2192,7 @@ export const getScheduleAnalysis = async (scheduleId) => {
             },
           },
           room: true,
-          supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+          proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
           timeSlot: true,
         },
       },
@@ -1041,19 +2204,19 @@ export const getScheduleAnalysis = async (scheduleId) => {
   const studentSlotSeen = new Map();
   const roomCapacityViolations = [];
   const roomReuseViolations = [];
-  const supervisorCollisions = [];
+  const proctorCollisions = [];
   const studentOverlaps = [];
   const roomSlotCount = new Map();
-  const supervisorSlotExamIds = new Map();
-  const supervisorDayExamIds = new Map();
-  const supervisorDailyLoadViolations = [];
+  const proctorSlotExamIds = new Map();
+  const proctorDayExamIds = new Map();
+  const proctorDailyLoadViolations = [];
   const examSlotCapacity = new Map();
 
-  // Build a map of supervisors for quick lookup
-  const supervisorMap = new Map();
+  // Build a map of proctors for quick lookup
+  const proctorMap = new Map();
   for (const assignment of schedule.assignments) {
-    if (!supervisorMap.has(assignment.supervisorId)) {
-      supervisorMap.set(assignment.supervisorId, assignment.supervisor);
+    if (!proctorMap.has(assignment.proctorId)) {
+      proctorMap.set(assignment.proctorId, assignment.proctor);
     }
   }
 
@@ -1079,15 +2242,15 @@ export const getScheduleAnalysis = async (scheduleId) => {
     roomSlotGroup.add(assignment.examId);
     roomSlotCount.set(roomSlotKey, roomSlotGroup);
 
-    const supervisorSlotKey = `${assignment.supervisorId}:${assignment.timeSlotId}`;
-    const supervisorSlotGroup = supervisorSlotExamIds.get(supervisorSlotKey) ?? new Set();
-    supervisorSlotGroup.add(assignment.examId);
-    supervisorSlotExamIds.set(supervisorSlotKey, supervisorSlotGroup);
+    const proctorSlotKey = `${assignment.proctorId}:${assignment.timeSlotId}`;
+    const proctorSlotGroup = proctorSlotExamIds.get(proctorSlotKey) ?? new Set();
+    proctorSlotGroup.add(assignment.examId);
+    proctorSlotExamIds.set(proctorSlotKey, proctorSlotGroup);
 
-    const supervisorDayKey = `${assignment.supervisorId}:${toDateKey(assignment.timeSlot.date ?? assignment.timeSlot.startTime)}`;
-    const supervisorDayGroup = supervisorDayExamIds.get(supervisorDayKey) ?? new Set();
-    supervisorDayGroup.add(assignment.examId);
-    supervisorDayExamIds.set(supervisorDayKey, supervisorDayGroup);
+    const proctorDayKey = `${assignment.proctorId}:${toDateKey(assignment.timeSlot.date ?? assignment.timeSlot.startTime)}`;
+    const proctorDayGroup = proctorDayExamIds.get(proctorDayKey) ?? new Set();
+    proctorDayGroup.add(assignment.examId);
+    proctorDayExamIds.set(proctorDayKey, proctorDayGroup);
 
     const studentIds = getUniqueStudentIdsForExam(assignment.exam);
     for (const studentId of studentIds) {
@@ -1121,20 +2284,20 @@ export const getScheduleAnalysis = async (scheduleId) => {
     }
   }
 
-  for (const [key, examIds] of supervisorSlotExamIds.entries()) {
+  for (const [key, examIds] of proctorSlotExamIds.entries()) {
     if (examIds.size > 1) {
-      const [supervisorId, timeSlotId] = key.split(':');
-      supervisorCollisions.push({ supervisorId, timeSlotId, count: examIds.size, examIds: [...examIds] });
+      const [proctorId, timeSlotId] = key.split(':');
+      proctorCollisions.push({ proctorId, timeSlotId, count: examIds.size, examIds: [...examIds] });
     }
   }
 
-  for (const [key, examIds] of supervisorDayExamIds.entries()) {
-    const [supervisorId, date] = key.split(':');
-    const supervisor = supervisorMap.get(supervisorId);
-    const maxExamsPerDay = supervisor?.maxExamsPerDay ?? 2;
+  for (const [key, examIds] of proctorDayExamIds.entries()) {
+    const [proctorId, date] = key.split(':');
+    const proctor = proctorMap.get(proctorId);
+    const maxExamsPerDay = proctor?.maxExamsPerDay ?? 2;
     if (examIds.size > maxExamsPerDay) {
-      supervisorDailyLoadViolations.push({
-        supervisorId,
+      proctorDailyLoadViolations.push({
+        proctorId,
         date,
         count: examIds.size,
         examIds: [...examIds],
@@ -1146,22 +2309,18 @@ export const getScheduleAnalysis = async (scheduleId) => {
   const derivedConflicts = {
     studentOverlaps,
     roomReuseViolations,
-    supervisorConflicts: supervisorCollisions,
-    supervisorDailyLoadViolations,
+    proctorConflicts: proctorCollisions,
+    proctorDailyLoadViolations,
     roomCapacityViolations,
   };
 
   const derivedConflictCount =
     studentOverlaps.length
     + roomReuseViolations.length
-    + supervisorCollisions.length
-    + supervisorDailyLoadViolations.length
+    + proctorCollisions.length
+    + proctorDailyLoadViolations.length
     + roomCapacityViolations.length;
-
-  const unresolvedPersistedConflicts = schedule.conflicts.filter(
-    (conflict) => !conflict.resolved
-  );
-  const totalConflicts = unresolvedPersistedConflicts.length + derivedConflictCount;
+  const totalConflicts = derivedConflictCount;
 
   const utilization =
     examSlotCapacity.size === 0
@@ -1176,33 +2335,127 @@ export const getScheduleAnalysis = async (scheduleId) => {
     isFinal: schedule.isFinal,
     metrics: {
       totalAssignments: schedule.assignments.length,
-      persistedConflicts: unresolvedPersistedConflicts.length,
       derivedConflicts: derivedConflictCount,
       totalConflicts,
       averageRoomUtilization: Number(utilization.toFixed(3)),
     },
     conflicts: {
-      persisted: unresolvedPersistedConflicts,
       derived: derivedConflicts,
     },
+  };
+};
+
+const getPublishedScheduleConflicts = async (scheduleId) => {
+  const schedule = await prisma.schedule.findUnique({
+    where: { id: scheduleId },
+    include: {
+      assignments: {
+        include: {
+          timeSlot: true,
+          exam: {
+            include: {
+              courseOffering: {
+                include: {
+                  registrations: { select: { studentId: true } },
+                  course: true,
+                },
+              },
+            },
+          },
+          room: true,
+          proctor: { include: { user: { select: { name: true } } } },
+        },
+      },
+    },
+  });
+
+  if (!schedule) throw new AppError('Schedule not found', 404);
+
+  const roomConflicts = [];
+  const proctorConflicts = [];
+  const studentConflicts = [];
+  const seen = new Set();
+
+  for (const assignment of schedule.assignments) {
+    const studentIds = getUniqueStudentIdsForExam(assignment.exam);
+    const clashes = await prisma.examAssignment.findMany({
+      where: {
+        scheduleId: { not: schedule.id },
+        schedule: { isFinal: true },
+        timeSlot: {
+          startTime: { lt: assignment.timeSlot.endTime },
+          endTime: { gt: assignment.timeSlot.startTime },
+        },
+        OR: [
+          { roomId: assignment.roomId },
+          { proctorId: assignment.proctorId },
+          ...(studentIds.length > 0
+            ? [{ exam: { courseOffering: { registrations: { some: { studentId: { in: studentIds } } } } } }]
+            : []),
+        ],
+      },
+      select: {
+        id: true,
+        scheduleId: true,
+        roomId: true,
+        proctorId: true,
+        exam: {
+          select: {
+            courseOffering: {
+              select: {
+                course: { select: { code: true, title: true } },
+                registrations: {
+                  where: { studentId: { in: studentIds } },
+                  select: { studentId: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    for (const clash of clashes) {
+      const baseKey = `${assignment.id}:${clash.id}`;
+      if (clash.roomId === assignment.roomId && !seen.has(`${baseKey}:room`)) {
+        seen.add(`${baseKey}:room`);
+        roomConflicts.push({ assignmentId: assignment.id, publishedAssignmentId: clash.id, scheduleId: clash.scheduleId, roomId: assignment.roomId });
+      }
+      if (clash.proctorId === assignment.proctorId && !seen.has(`${baseKey}:proctor`)) {
+        seen.add(`${baseKey}:proctor`);
+        proctorConflicts.push({ assignmentId: assignment.id, publishedAssignmentId: clash.id, scheduleId: clash.scheduleId, proctorId: assignment.proctorId });
+      }
+      const overlappingStudents = (clash.exam?.courseOffering?.registrations ?? []).map((registration) => registration.studentId);
+      if (overlappingStudents.length > 0 && !seen.has(`${baseKey}:student`)) {
+        seen.add(`${baseKey}:student`);
+        studentConflicts.push({ assignmentId: assignment.id, publishedAssignmentId: clash.id, scheduleId: clash.scheduleId, studentIds: overlappingStudents });
+      }
+    }
+  }
+
+  return {
+    roomConflicts,
+    proctorConflicts,
+    studentConflicts,
+    total: roomConflicts.length + proctorConflicts.length + studentConflicts.length,
   };
 };
 
 export const publishSchedule = async (scheduleId) => {
   const existing = await prisma.schedule.findUnique({
     where: { id: scheduleId },
-    include: { conflicts: true },
   });
 
   if (!existing) throw new AppError('Schedule not found', 404);
 
-  if (existing.conflicts.some((conflict) => !conflict.resolved)) {
-    throw new AppError('Cannot publish schedule with unresolved conflicts', 400);
-  }
-
   const analysis = await getScheduleAnalysis(scheduleId);
   if (analysis.metrics.totalConflicts > 0) {
-    throw new AppError('Cannot publish schedule while derived conflicts still exist', 400);
+    throw new AppError('Cannot publish schedule while hard-constraint issues still exist', 400);
+  }
+
+  const publishedConflicts = await getPublishedScheduleConflicts(scheduleId);
+  if (publishedConflicts.total > 0) {
+    throw new AppError('Cannot publish schedule because it conflicts with an existing published schedule.', 400);
   }
 
   const schedule = await prisma.schedule.update({

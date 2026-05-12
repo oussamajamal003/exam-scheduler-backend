@@ -1,4 +1,4 @@
-import prisma from '../../config/prisma.js';
+﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
 const timeSlotInclude = {
@@ -7,7 +7,7 @@ const timeSlotInclude = {
       schedule: true,
       exam: { include: { courseOffering: { include: { course: true, semester: true } } } },
       room: true,
-      supervisor: { include: { user: { select: { id: true, name: true, email: true } } } },
+      proctor: { include: { user: { select: { id: true, name: true, email: true } } } },
     },
   },
 };
