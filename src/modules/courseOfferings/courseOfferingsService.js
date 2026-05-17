@@ -13,6 +13,27 @@ const courseOfferingInclude = {
   _count: { select: { registrations: true, exams: true } },
 };
 
+const getHasExamForCourseType = (courseType = 'COURSE') => courseType === 'COURSE';
+
+const normalizeExamEligibilityInput = (data, currentOffering = null) => {
+  const courseType = data.courseType ?? currentOffering?.courseType ?? 'COURSE';
+  return {
+    ...data,
+    courseType,
+    hasExam: getHasExamForCourseType(courseType),
+  };
+};
+
+const toCourseOfferingWriteData = (data) => {
+  const { courseId, semesterId, ...rest } = data;
+
+  return {
+    ...rest,
+    ...(courseId ? { course: { connect: { id: courseId } } } : {}),
+    ...(semesterId ? { semester: { connect: { id: semesterId } } } : {}),
+  };
+};
+
 const normalizeCourseOffering = (offering) => {
   if (!offering) return offering;
 
@@ -39,6 +60,8 @@ export const getAll = async (query = {}) => {
   const where = {};
   if (query.courseId) where.courseId = query.courseId;
   if (query.semesterId) where.semesterId = query.semesterId;
+  if (query.courseType) where.courseType = query.courseType;
+  if (query.hasExam !== undefined) where.hasExam = query.hasExam === true || query.hasExam === 'true';
   if (query.status) where.status = query.status;
   if (query.search) {
     where.OR = [
@@ -95,17 +118,39 @@ export const getById = async (id) => {
 
 export const create = async (data) => {
   const offering = await prisma.courseOffering.create({
-    data,
+    data: toCourseOfferingWriteData(normalizeExamEligibilityInput(data)),
     include: courseOfferingInclude,
   });
   return normalizeCourseOffering(offering);
 };
 
 export const update = async (id, data) => {
-  const offering = await prisma.courseOffering.update({
-    where: { id },
-    data,
-    include: courseOfferingInclude,
+  const currentOffering = await prisma.courseOffering.findUnique({ where: { id } });
+  if (!currentOffering) throw new AppError('Course offering not found', 404);
+
+  const normalizedData = normalizeExamEligibilityInput(data, currentOffering);
+  if (normalizedData.courseType === 'PROJECT') {
+    const exams = await prisma.exam.findMany({
+      where: { courseOfferingId: id },
+      select: { id: true, _count: { select: { assignments: true } } },
+    });
+    const hasScheduledExam = exams.some((exam) => exam._count.assignments > 0);
+
+    if (hasScheduledExam) {
+      throw new AppError('Cannot mark this offering as PROJECT while it has scheduled exam assignments. Remove those assignments first.', 409);
+    }
+  }
+
+  const offering = await prisma.$transaction(async (tx) => {
+    if (normalizedData.courseType === 'PROJECT') {
+      await tx.exam.deleteMany({ where: { courseOfferingId: id } });
+    }
+
+    return tx.courseOffering.update({
+      where: { id },
+      data: toCourseOfferingWriteData(normalizedData),
+      include: courseOfferingInclude,
+    });
   });
   return normalizeCourseOffering(offering);
 };

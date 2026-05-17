@@ -34,6 +34,11 @@ enum OfferingStatus {
   CANCELLED
 }
 
+enum CourseType {
+  COURSE
+  PROJECT
+}
+
 enum SemesterStatus {
   ACTIVE
   UPCOMING
@@ -202,6 +207,8 @@ model CourseOffering {
   notes        String?
   priority   Int?   // higher = schedule earlier
   difficulty Int?   // harder exam (needs spacing)
+  courseType       CourseType      @default(COURSE)
+  hasExam          Boolean         @default(true)
   status           OfferingStatus @default(ACTIVE)
   createdBy        String?
   createdAt    DateTime       @default(now())
@@ -328,6 +335,7 @@ model Exam {
 model Schedule {
   id        String   @id @default(uuid())
   name      String
+  examPeriod String?
   isFinal   Boolean  @default(false)
   createdBy String?
   createdAt DateTime @default(now())

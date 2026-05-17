@@ -37,4 +37,8 @@ export const publishScheduleSchema = z.object({
   params: z.object({
     id: z.string().uuid(),
   }),
+  body: z.object({
+    examPeriod: z.string().trim().min(1).max(80).optional(),
+    periodName: z.string().trim().min(1).max(80).optional(),
+  }).optional().default({}),
 });

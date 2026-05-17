@@ -7,6 +7,22 @@ const PROCTOR_RATIO = 20; // 1 proctor per 20 students
 const MAX_STUDENT_EXAMS_PER_DAY = 2;
 const LOCAL_SEARCH_EXAM_LIMIT = 30;
 const LOCAL_SEARCH_CANDIDATE_LIMIT = 6;
+const CANDIDATE_PENALTY_WEIGHTS = {
+  unusedRoomSeats: 0.30,
+  proctorWorkload: 0.25,
+  studentDailyLoad: 0.25,
+  roomCenterSpread: 0.20,
+};
+const EXAM_PRIORITY_BAND = {
+  CRITICAL: 'CRITICAL',
+  HIGH: 'HIGH',
+  NORMAL: 'NORMAL',
+};
+const EXAM_PRIORITY_BAND_RANK = {
+  [EXAM_PRIORITY_BAND.CRITICAL]: 3,
+  [EXAM_PRIORITY_BAND.HIGH]: 2,
+  [EXAM_PRIORITY_BAND.NORMAL]: 1,
+};
 const QUALITY_WEIGHTS = {
   roomUtilization: 0.25,
   proctorWorkloadBalance: 0.25,
@@ -233,9 +249,145 @@ const addExamFeasibilityStats = ({ exams, rooms, proctors, timeSlots }) => exams
   feasibleOptionCount: getStaticFeasibleOptionCount({ exam, rooms, proctors, timeSlots }),
 }));
 
-const compareExamsForScheduling = (a, b) => (
-  b.studentCount - a.studentCount
+const percentile = (values, ratio) => {
+  if (!values.length) return 0;
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * ratio) - 1),
+  );
+
+  return sorted[index];
+};
+
+const getCourseLevel = (courseCode) => {
+  const match = `${courseCode ?? ''}`.match(/(\d{3})/);
+  return match ? Number.parseInt(match[1], 10) : null;
+};
+
+const getPriorityText = (exam) => [
+  exam.courseCode,
+  exam.courseTitle,
+  exam.courseOffering?.notes,
+  exam.courseOffering?.section,
+]
+  .filter(Boolean)
+  .join(' ')
+  .toLowerCase();
+
+const getExamProgramIds = (exam) => {
+  const programIds = new Set();
+
+  if (exam.courseOffering?.course?.programId) {
+    programIds.add(exam.courseOffering.course.programId);
+  }
+
+  for (const registration of exam.courseOffering?.registrations ?? []) {
+    if (registration.student?.programId) {
+      programIds.add(registration.student.programId);
+    }
+  }
+
+  return programIds;
+};
+
+const isGraduationOrFinalYearCourse = (exam) => {
+  const priorityText = getPriorityText(exam);
+  const courseLevel = getCourseLevel(exam.courseCode);
+
+  return courseLevel >= 400
+    || /(capstone|thesis|dissertation|graduation|final\s*year|senior\s*project|project\s*(ii|2)|internship|practicum)/i.test(priorityText);
+};
+
+const isCoreMandatoryCourse = (exam) => {
+  const priorityText = getPriorityText(exam);
+
+  return /(mandatory|required|core|fundamentals?|foundation|foundations|principles|introduction|intro\b)/i.test(priorityText);
+};
+
+const isUniversityWideSharedCourse = (exam, totalProgramCount) => {
+  const priorityText = getPriorityText(exam);
+  const coveredPrograms = getExamProgramIds(exam).size;
+  const broadCoverageThreshold = totalProgramCount > 0
+    ? Math.max(2, Math.ceil(totalProgramCount * 0.6))
+    : 3;
+
+  return coveredPrograms >= broadCoverageThreshold
+    || coveredPrograms >= 3
+    || /(shared|common|general\s+education|university[-\s]*wide|interdisciplinary)/i.test(priorityText);
+};
+
+const addExamPriorityBands = (exams) => {
+  const studentCounts = exams.map((exam) => exam.studentCount ?? 0);
+  const resourceDemands = exams.map((exam) => exam.resourceDemand ?? 0);
+  const requiredProctors = exams.map((exam) => getRequiredProctorsForExam(exam));
+  const allProgramIds = new Set();
+
+  for (const exam of exams) {
+    for (const programId of getExamProgramIds(exam)) {
+      allProgramIds.add(programId);
+    }
+  }
+
+  const largeStudentThreshold = Math.max(35, percentile(studentCounts, 0.75));
+  const highResourceThreshold = Math.max(60, percentile(resourceDemands, 0.75));
+  const highProctorThreshold = Math.max(3, percentile(requiredProctors, 0.75));
+
+  return exams.map((exam) => {
+    const largeStudentCount = (exam.studentCount ?? 0) >= largeStudentThreshold;
+    const graduationOrFinalYear = isGraduationOrFinalYearCourse(exam);
+    const coreOrMandatory = isCoreMandatoryCourse(exam);
+    const universityWideShared = isUniversityWideSharedCourse(exam, allProgramIds.size);
+    const highResourceDemand = (exam.resourceDemand ?? 0) >= highResourceThreshold
+      || getRequiredProctorsForExam(exam) >= highProctorThreshold
+      || (exam.duration ?? DEFAULT_EXAM_DURATION) >= 180;
+
+    const inferredPriorityScore = [
+      largeStudentCount ? 2 : 0,
+      graduationOrFinalYear ? 3 : 0,
+      coreOrMandatory ? 2 : 0,
+      universityWideShared ? 3 : 0,
+      highResourceDemand ? 2 : 0,
+    ].reduce((total, value) => total + value, 0);
+
+    let priorityBand = EXAM_PRIORITY_BAND.NORMAL;
+    if (
+      (graduationOrFinalYear && (largeStudentCount || coreOrMandatory || universityWideShared || highResourceDemand))
+      || (universityWideShared && (largeStudentCount || highResourceDemand))
+      || inferredPriorityScore >= 6
+    ) {
+      priorityBand = EXAM_PRIORITY_BAND.CRITICAL;
+    } else if (inferredPriorityScore >= 3) {
+      priorityBand = EXAM_PRIORITY_BAND.HIGH;
+    }
+
+    return {
+      ...exam,
+      priorityBand,
+      priorityBandRank: EXAM_PRIORITY_BAND_RANK[priorityBand],
+      inferredPriorityScore,
+      prioritySignals: {
+        largeStudentCount,
+        graduationOrFinalYear,
+        coreOrMandatory,
+        universityWideShared,
+        highResourceDemand,
+      },
+    };
+  });
+};
+
+const comparePriorityBands = (a, b) => (
+  (b.priorityBandRank ?? EXAM_PRIORITY_BAND_RANK.NORMAL)
+  - (a.priorityBandRank ?? EXAM_PRIORITY_BAND_RANK.NORMAL)
+  || (b.inferredPriorityScore ?? 0) - (a.inferredPriorityScore ?? 0)
   || b.priority - a.priority
+);
+
+const compareExamsForScheduling = (a, b) => (
+  comparePriorityBands(a, b)
+  || b.studentCount - a.studentCount
   || b.resourceDemand - a.resourceDemand
   || a.feasibleOptionCount - b.feasibleOptionCount
   || a.feasibleTimeSlotCount - b.feasibleTimeSlotCount
@@ -245,21 +397,22 @@ const compareExamsForScheduling = (a, b) => (
 );
 
 const compareExamsLeastConstrainedFirst = (a, b) => (
-  a.conflictCount - b.conflictCount
+  comparePriorityBands(a, b)
+  || a.conflictCount - b.conflictCount
   || a.studentCount - b.studentCount
-  || a.priority - b.priority
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
 );
 
 const compareExamsPriorityFirst = (a, b) => (
-  b.priority - a.priority
+  comparePriorityBands(a, b)
   || b.studentCount - a.studentCount
   || b.conflictCount - a.conflictCount
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
 );
 
 const compareExamsShortestFirst = (a, b) => (
-  (a.duration ?? DEFAULT_EXAM_DURATION) - (b.duration ?? DEFAULT_EXAM_DURATION)
+  comparePriorityBands(a, b)
+  || (a.duration ?? DEFAULT_EXAM_DURATION) - (b.duration ?? DEFAULT_EXAM_DURATION)
   || a.conflictCount - b.conflictCount
   || a.studentCount - b.studentCount
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
@@ -322,9 +475,10 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
     proctors: normalizedProctors,
     timeSlots,
   });
+  const prioritizedExams = addExamPriorityBands(examsWithConflictCounts);
 
   return {
-    exams: examsWithConflictCounts,
+    exams: prioritizedExams,
     rooms: normalizedRooms,
     proctors: normalizedProctors,
     timeSlots,
@@ -332,7 +486,7 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
     studentExamMap,
     studentToExams: studentExamMap,
     lookups: buildSchedulingLookups({
-      exams: examsWithConflictCounts,
+      exams: prioritizedExams,
       rooms: normalizedRooms,
       proctors: normalizedProctors,
       timeSlots,
@@ -342,7 +496,11 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
 };
 
 const ensureExamRecords = async (courseOfferings) => {
-  const missingOfferings = courseOfferings.filter((offering) => offering.exams.length === 0);
+  const missingOfferings = courseOfferings.filter((offering) => (
+    offering.hasExam !== false
+    && offering.courseType !== 'PROJECT'
+    && offering.exams.length === 0
+  ));
 
   if (missingOfferings.length > 0) {
     const createdExams = await prisma.$transaction(
@@ -371,7 +529,12 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
 
   const [courseOfferings, rooms, proctors, allTimeSlots, existingAssignments] = await Promise.all([
     prisma.courseOffering.findMany({
-      where: { semesterId, status: 'ACTIVE' },
+      where: {
+        semesterId,
+        status: 'ACTIVE',
+        courseType: 'COURSE',
+        hasExam: true,
+      },
       include: {
         course: true,
         semester: true,
@@ -380,13 +543,18 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
             id: true,
             studentId: true,
             status: true,
-            student: { select: { user: { select: { name: true, email: true } } } },
+            student: {
+              select: {
+                programId: true,
+                user: { select: { name: true, email: true } },
+              },
+            },
           },
         },
         exams: true,
         _count: { select: { registrations: true } },
       },
-      orderBy: [{ priority: 'desc' }, { course: { code: 'asc' } }, { section: 'asc' }],
+      orderBy: [{ course: { code: 'asc' } }, { section: 'asc' }],
     }),
     prisma.room.findMany({
       where: { status: 'AVAILABLE' },
@@ -407,7 +575,15 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
     }),
     prisma.timeSlot.findMany({ orderBy: [{ startTime: 'asc' }, { endTime: 'asc' }] }),
     prisma.examAssignment.findMany({
-      where: { exam: { courseOffering: { semesterId } } },
+      where: {
+        exam: {
+          courseOffering: {
+            semesterId,
+            courseType: 'COURSE',
+            hasExam: true,
+          },
+        },
+      },
       include: {
         schedule: true,
         timeSlot: true,
@@ -994,20 +1170,83 @@ const orderTimeSlotsForStrategy = (timeSlots, strategyId) => {
   return ordered;
 };
 
-const scoreSoftCandidate = ({ exam, slot, allocation, usage, slotDayKey }) => {
-  const uniqueRooms = [...new Map(allocation.map(({ room }) => [room.id, room])).values()];
+const getUniqueAllocationRooms = (allocation) => [...new Map(
+  allocation.map(({ room }) => [room.id, room]),
+).values()];
+
+const getUniqueAllocationProctors = (allocation) => [...new Map(
+  allocation.map(({ proctor }) => [proctor.id, proctor]),
+).values()];
+
+const normalizePenaltyRatio = (value, max = 1) => {
+  if (max <= 0) return 0;
+  return clampScore((Math.max(0, value) / max) * 100);
+};
+
+const getUnusedRoomSeatsPenalty = (exam, uniqueRooms) => {
   const totalCapacity = getTotalCapacity(uniqueRooms);
-  const unusedSeatsPenalty = Math.max(0, totalCapacity - exam.requiredSeats);
-  const roomSpreadPenalty = Math.max(0, uniqueRooms.length - 1) * 12;
-  const centerSpreadPenalty = Math.max(0, new Set(uniqueRooms.map((room) => room.centerId)).size - 1) * 25;
-  const studentDailyLoadPenalty = exam.studentIds.reduce((total, studentId) => (
-    total + ((usage.studentDailyLoadMap.get(`${studentId}:${slotDayKey}`) ?? 0) * 20)
-  ), 0);
-  const proctorDailyLoadPenalty = allocation.reduce((total, { proctor }) => (
-    total + ((usage.proctorDailyLoadMap.get(`${proctor.id}:${slotDayKey}`) ?? 0) * 10)
+  if (totalCapacity <= 0) return 100;
+
+  return normalizePenaltyRatio(
+    Math.max(0, totalCapacity - exam.requiredSeats),
+    totalCapacity,
+  );
+};
+
+const getProctorWorkloadPenalty = ({ allocation, usage, slotDayKey }) => {
+  const uniqueProctors = getUniqueAllocationProctors(allocation);
+  if (uniqueProctors.length === 0) return 100;
+
+  const projectedLoadRatios = uniqueProctors.map((proctor) => {
+    const currentLoad = usage.proctorDailyLoadMap.get(`${proctor.id}:${slotDayKey}`) ?? 0;
+    const maxDailyLoad = Math.max(1, proctor.maxExamsPerDay ?? 1);
+    return Math.min(1, (currentLoad + 1) / maxDailyLoad);
+  });
+
+  return clampScore(average(projectedLoadRatios) * 100);
+};
+
+const getStudentDailyLoadPenalty = ({ exam, usage, slotDayKey }) => {
+  const studentIds = exam.studentIds ?? [];
+  if (!studentIds.length) return 100;
+
+  const currentLoadRatios = studentIds.map((studentId) => {
+    const currentLoad = usage.studentDailyLoadMap.get(`${studentId}:${slotDayKey}`) ?? 0;
+    return Math.min(1, currentLoad / Math.max(1, MAX_STUDENT_EXAMS_PER_DAY - 1));
+  });
+
+  return clampScore(average(currentLoadRatios) * 100);
+};
+
+const getRoomCenterSpreadPenalty = (exam, uniqueRooms) => {
+  if (uniqueRooms.length <= 1) return 0;
+
+  const centerCount = new Set(uniqueRooms.map((room) => room.centerId ?? room.id)).size;
+  const maxSpread = Math.max(1, getRequiredProctorsForExam(exam) - 1, uniqueRooms.length - 1);
+  const roomSpreadPenalty = normalizePenaltyRatio(uniqueRooms.length - 1, maxSpread);
+  const centerSpreadPenalty = normalizePenaltyRatio(centerCount - 1, maxSpread);
+
+  return clampScore((roomSpreadPenalty * 0.4) + (centerSpreadPenalty * 0.6));
+};
+
+const scoreNormalizedCandidatePenalty = ({ exam, allocation, usage, slotDayKey }) => {
+  const uniqueRooms = getUniqueAllocationRooms(allocation);
+  const components = {
+    unusedRoomSeats: getUnusedRoomSeatsPenalty(exam, uniqueRooms),
+    proctorWorkload: getProctorWorkloadPenalty({ allocation, usage, slotDayKey }),
+    studentDailyLoad: getStudentDailyLoadPenalty({ exam, usage, slotDayKey }),
+    roomCenterSpread: getRoomCenterSpreadPenalty(exam, uniqueRooms),
+  };
+  const total = Object.entries(CANDIDATE_PENALTY_WEIGHTS).reduce((score, [key, weight]) => (
+    score + ((components[key] ?? 0) * weight)
   ), 0);
 
-  return unusedSeatsPenalty + roomSpreadPenalty + centerSpreadPenalty + studentDailyLoadPenalty + proctorDailyLoadPenalty;
+  return {
+    total: roundMetric(total),
+    components: Object.fromEntries(
+      Object.entries(components).map(([key, value]) => [key, roundMetric(value)]),
+    ),
+  };
 };
 
 const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy }) => {
@@ -1026,9 +1265,15 @@ const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, u
     const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey });
     if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
 
-    const softPenalty = scoreSoftCandidate({ exam, slot, allocation, usage, slotDayKey });
-    candidates.push({ slot, allocation, slotDayKey, softPenalty });
-    if (strategy.earlyStopOnPerfectCandidate && softPenalty === 0) break;
+    const penalty = scoreNormalizedCandidatePenalty({ exam, allocation, usage, slotDayKey });
+    candidates.push({
+      slot,
+      allocation,
+      slotDayKey,
+      penalty,
+      softPenalty: penalty.total,
+    });
+    if (strategy.earlyStopOnPerfectCandidate && penalty.total === 0) break;
   }
 
   return candidates.sort((a, b) => a.softPenalty - b.softPenalty || a.slot.startTime - b.slot.startTime);
@@ -1094,6 +1339,8 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
       roomIds: bestCandidate.allocation.map(({ room }) => room.id),
       proctorIds: bestCandidate.allocation.map(({ proctor }) => proctor.id),
       softPenalty: bestCandidate.softPenalty,
+      normalizedPenalty: bestCandidate.penalty,
+      penaltyComponents: bestCandidate.penalty.components,
     });
   }
 
@@ -1121,8 +1368,19 @@ const standardDeviation = (values) => {
   return Math.sqrt(average(values.map((value) => (value - mean) ** 2)));
 };
 
+const variance = (values) => {
+  if (values.length <= 1) return 0;
+  const mean = average(values);
+  return average(values.map((value) => (value - mean) ** 2));
+};
+
 const getDayDistance = (left, right) => Math.abs(
   (new Date(right).setHours(0, 0, 0, 0) - new Date(left).setHours(0, 0, 0, 0)) / 86400000,
+);
+
+const getMinuteDistance = (leftSlot, rightSlot) => Math.max(
+  0,
+  Math.round((rightSlot.startTime.getTime() - leftSlot.endTime.getTime()) / 60000),
 );
 
 const groupAssignmentsByExam = (assignments = []) => {
@@ -1134,6 +1392,74 @@ const groupAssignmentsByExam = (assignments = []) => {
   return groups;
 };
 
+const formatMetricLabel = (key) => key
+  .replace(/([A-Z])/g, ' $1')
+  .replace(/^./, (char) => char.toUpperCase());
+
+const buildQualitySuggestions = (metrics) => {
+  const suggestions = [];
+
+  if (metrics.roomUtilization < 75) {
+    suggestions.push('Use smaller rooms or combine compatible room allocations to reduce unused seats.');
+  }
+  if (metrics.proctorWorkloadBalance < 75) {
+    suggestions.push('Rebalance assignments across available proctors so workload stays closer to the ideal load.');
+  }
+  if (metrics.studentSpacing < 75) {
+    suggestions.push('Move same-student exams away from same-day or back-to-back slots.');
+  }
+  if (metrics.examDistribution < 75) {
+    suggestions.push('Spread exams more evenly across exam days to reduce daily peaks.');
+  }
+  if (metrics.preferredSpacing < 75) {
+    suggestions.push('Increase one-day-or-more gaps between exams sharing students.');
+  }
+
+  return suggestions.length > 0
+    ? suggestions
+    : ['Schedule quality is strong across utilization, proctor balance, spacing, and distribution.'];
+};
+
+const calculateStudentSpacingMetrics = (studentSlotEntries) => {
+  let totalPairs = 0;
+  let preferredGapSatisfied = 0;
+  let spacingPenalty = 0;
+  let sameDayPairCount = 0;
+  let backToBackPairCount = 0;
+
+  for (const slots of studentSlotEntries.values()) {
+    const orderedSlots = [...slots].sort((a, b) => a.startTime - b.startTime);
+    for (let leftIndex = 0; leftIndex < orderedSlots.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < orderedSlots.length; rightIndex += 1) {
+        const leftSlot = orderedSlots[leftIndex];
+        const rightSlot = orderedSlots[rightIndex];
+        const gapDays = getDayDistance(leftSlot.startTime, rightSlot.startTime);
+
+        totalPairs += 1;
+        if (gapDays >= 1) {
+          preferredGapSatisfied += 1;
+          continue;
+        }
+
+        sameDayPairCount += 1;
+        const minuteGap = getMinuteDistance(leftSlot, rightSlot);
+        const isBackToBack = minuteGap <= 30;
+        if (isBackToBack) backToBackPairCount += 1;
+        spacingPenalty += isBackToBack ? 100 : 70;
+      }
+    }
+  }
+
+  return {
+    totalPairs,
+    preferredGapSatisfied,
+    sameDayPairCount,
+    backToBackPairCount,
+    studentSpacing: totalPairs === 0 ? 100 : clampScore(100 - (spacingPenalty / totalPairs)),
+    preferredSpacing: totalPairs === 0 ? 100 : clampScore((preferredGapSatisfied / totalPairs) * 100),
+  };
+};
+
 const evaluateDraftSchedule = ({ normalized, draft }) => {
   const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
   const roomById = new Map(normalized.rooms.map((room) => [room.id, room]));
@@ -1141,11 +1467,14 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
   const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
   const assignmentsByExam = groupAssignmentsByExam(draft.assignmentInserts);
 
-  const roomUtilizationRatios = [];
+  let totalUsedSeats = 0;
+  let totalAvailableSeats = 0;
   const proctorWorkloads = new Map(proctorIds.map((id) => [id, 0]));
   const studentSlotEntries = new Map();
-  const dayExamCounts = new Map();
-  const slotExamCounts = new Map();
+  const dayExamCounts = new Map(
+    [...new Set(normalized.timeSlots.map((slot) => toDateKey(slot.date ?? slot.startTime)))]
+      .map((dayKey) => [dayKey, 0]),
+  );
   let centerSpreadPenalty = 0;
 
   for (const [examId, assignments] of assignmentsByExam.entries()) {
@@ -1158,7 +1487,8 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
       .filter(Boolean)
       .map((room) => [room.id, room])).values()];
     const capacity = getTotalCapacity(uniqueRooms);
-    if (capacity > 0) roomUtilizationRatios.push(Math.min(1, exam.requiredSeats / capacity));
+    totalUsedSeats += Math.min(exam.requiredSeats, capacity);
+    totalAvailableSeats += capacity;
 
     const uniqueProctorIds = new Set(assignments.map((assignment) => assignment.proctorId));
     for (const proctorId of uniqueProctorIds) {
@@ -1169,7 +1499,6 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
 
     const dayKey = toDateKey(slot.date ?? slot.startTime);
     dayExamCounts.set(dayKey, (dayExamCounts.get(dayKey) ?? 0) + 1);
-    slotExamCounts.set(slot.id, (slotExamCounts.get(slot.id) ?? 0) + 1);
 
     for (const studentId of exam.studentIds) {
       if (!studentSlotEntries.has(studentId)) studentSlotEntries.set(studentId, []);
@@ -1177,42 +1506,38 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
     }
   }
 
-  const roomUtilization = clampScore(average(roomUtilizationRatios) * 100);
+  const roomUtilization = totalAvailableSeats === 0
+    ? 0
+    : clampScore((totalUsedSeats / totalAvailableSeats) * 100);
 
   const workloadValues = [...proctorWorkloads.values()];
-  const workloadMean = average(workloadValues);
-  const workloadStdDev = standardDeviation(workloadValues);
-  const proctorWorkloadBalance = workloadValues.length === 0
+  const totalAssignments = workloadValues.reduce((total, load) => total + load, 0);
+  const idealLoad = proctorIds.length === 0 ? 0 : totalAssignments / proctorIds.length;
+  const proctorBalancePenalty = workloadValues.reduce((total, load) => total + Math.abs(load - idealLoad), 0);
+  const maxProctorBalancePenalty = totalAssignments === 0 || proctorIds.length <= 1
     ? 0
-    : clampScore(100 - ((workloadStdDev / Math.max(1, workloadMean)) * 45));
+    : 2 * totalAssignments * (1 - (1 / proctorIds.length));
+  const proctorWorkloadBalance = maxProctorBalancePenalty === 0
+    ? (totalAssignments === 0 ? 100 : 0)
+    : clampScore(100 - ((proctorBalancePenalty / maxProctorBalancePenalty) * 100));
 
-  const spacingScores = [];
-  const preferredSpacingScores = [];
-  for (const slots of studentSlotEntries.values()) {
-    const orderedSlots = [...slots].sort((a, b) => a.startTime - b.startTime);
-    for (let index = 1; index < orderedSlots.length; index += 1) {
-      const gapDays = getDayDistance(orderedSlots[index - 1].startTime, orderedSlots[index].startTime);
-      spacingScores.push(clampScore((gapDays / 2) * 100));
-      preferredSpacingScores.push(gapDays >= 1 ? 100 : 35);
-    }
-  }
-  const studentSpacing = spacingScores.length === 0 ? 100 : average(spacingScores);
-  const preferredSpacing = preferredSpacingScores.length === 0 ? 100 : average(preferredSpacingScores);
-
-  const distributionValues = [...dayExamCounts.values(), ...slotExamCounts.values()];
-  const distributionMean = average(distributionValues);
-  const distributionStdDev = standardDeviation(distributionValues);
-  const examDistribution = distributionValues.length === 0
-    ? 0
-    : clampScore(100 - ((distributionStdDev / Math.max(1, distributionMean)) * 35));
+  const spacingMetrics = calculateStudentSpacingMetrics(studentSlotEntries);
+  const distributionValues = [...dayExamCounts.values()];
+  const distributionVariance = variance(distributionValues);
+  const maxDistributionVariance = assignmentsByExam.size > 0 && distributionValues.length > 1
+    ? ((assignmentsByExam.size ** 2) * (distributionValues.length - 1)) / (distributionValues.length ** 2)
+    : 0;
+  const examDistribution = maxDistributionVariance === 0
+    ? (assignmentsByExam.size > 0 ? 100 : 0)
+    : clampScore(100 - ((distributionVariance / maxDistributionVariance) * 100));
 
   const centerProximity = clampScore(100 - (centerSpreadPenalty * 8));
   const metrics = {
     roomUtilization: roundMetric(roomUtilization),
     proctorWorkloadBalance: roundMetric(proctorWorkloadBalance),
-    studentSpacing: roundMetric(studentSpacing),
+    studentSpacing: roundMetric(spacingMetrics.studentSpacing),
     examDistribution: roundMetric(examDistribution),
-    preferredSpacing: roundMetric(preferredSpacing),
+    preferredSpacing: roundMetric(spacingMetrics.preferredSpacing),
     centerProximity: roundMetric(centerProximity),
   };
   const score = roundMetric(
@@ -1224,16 +1549,30 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
   );
 
   const weakAreas = Object.entries(metrics)
+    .filter(([key]) => key !== 'centerProximity')
     .filter(([, value]) => value < 75)
-    .map(([key, value]) => ({ area: key, score: value }));
+    .map(([key, value]) => ({ area: key, label: formatMetricLabel(key), score: value }));
+  const suggestions = buildQualitySuggestions(metrics);
 
   return {
     score,
     scorePercent: `${score}%`,
     weakAreas,
+    suggestions,
     metrics,
     qualityMetrics: {
       ...metrics,
+      totalUsedSeats,
+      totalAvailableSeats,
+      idealProctorLoad: roundMetric(idealLoad),
+      proctorBalancePenalty: roundMetric(proctorBalancePenalty),
+      normalizedProctorBalancePenalty: roundMetric(100 - proctorWorkloadBalance),
+      totalStudentExamPairs: spacingMetrics.totalPairs,
+      preferredGapSatisfied: spacingMetrics.preferredGapSatisfied,
+      sameDayPairCount: spacingMetrics.sameDayPairCount,
+      backToBackPairCount: spacingMetrics.backToBackPairCount,
+      distributionVariance: roundMetric(distributionVariance),
+      normalizedDistributionVariance: roundMetric(100 - examDistribution),
       proctorWorkloadRange: workloadValues.length > 0
         ? Math.max(...workloadValues) - Math.min(...workloadValues)
         : 0,
@@ -1297,6 +1636,8 @@ const replaceExamAssignments = ({ draft, examId, candidate }) => {
         roomIds: candidate.allocation.map(({ room }) => room.id),
         proctorIds: candidate.allocation.map(({ proctor }) => proctor.id),
         softPenalty: candidate.softPenalty,
+        normalizedPenalty: candidate.penalty,
+        penaltyComponents: candidate.penalty.components,
       },
     ],
   };
@@ -2345,7 +2686,7 @@ export const getScheduleAnalysis = async (scheduleId) => {
   };
 };
 
-const getPublishedScheduleConflicts = async (scheduleId) => {
+const getPublishedScheduleConflicts = async (scheduleId, semesterId) => {
   const schedule = await prisma.schedule.findUnique({
     where: { id: scheduleId },
     include: {
@@ -2382,6 +2723,7 @@ const getPublishedScheduleConflicts = async (scheduleId) => {
       where: {
         scheduleId: { not: schedule.id },
         schedule: { isFinal: true },
+        exam: { courseOffering: { semesterId } },
         timeSlot: {
           startTime: { lt: assignment.timeSlot.endTime },
           endTime: { gt: assignment.timeSlot.startTime },
@@ -2441,26 +2783,85 @@ const getPublishedScheduleConflicts = async (scheduleId) => {
   };
 };
 
-export const publishSchedule = async (scheduleId) => {
+const normalizeExamPeriod = (value) => String(value ?? '').trim();
+
+const getExamPeriodKey = (value) => normalizeExamPeriod(value).toLowerCase();
+
+const getScheduleSemesterId = async (scheduleId) => {
+  const assignments = await prisma.examAssignment.findMany({
+    where: { scheduleId },
+    select: { exam: { select: { courseOffering: { select: { semesterId: true } } } } },
+  });
+
+  const semesterIds = new Set(
+    assignments
+      .map((assignment) => assignment.exam?.courseOffering?.semesterId)
+      .filter(Boolean),
+  );
+
+  if (semesterIds.size === 0) {
+    throw new AppError('Cannot publish a schedule with no semester-linked assignments.', 400);
+  }
+
+  if (semesterIds.size > 1) {
+    throw new AppError('Cannot publish a schedule that contains assignments from multiple semesters.', 400);
+  }
+
+  return [...semesterIds][0];
+};
+
+const validatePublishedSchedulePeriod = async ({ scheduleId, examPeriod, semesterId }) => {
+  const publishedSchedules = await prisma.schedule.findMany({
+    where: {
+      id: { not: scheduleId },
+      isFinal: true,
+      assignments: { some: { exam: { courseOffering: { semesterId } } } },
+    },
+    select: { id: true, name: true, examPeriod: true },
+  });
+
+  if (publishedSchedules.length >= 2) {
+    throw new AppError('Cannot publish more than 2 schedules for the same semester.', 400);
+  }
+
+  const periodKey = getExamPeriodKey(examPeriod);
+  const samePeriod = publishedSchedules.find(
+    (schedule) => getExamPeriodKey(schedule.examPeriod) === periodKey,
+  );
+
+  if (samePeriod) {
+    throw new AppError(`A published ${examPeriod} schedule already exists for this semester.`, 400);
+  }
+};
+
+export const publishSchedule = async (scheduleId, payload = {}) => {
   const existing = await prisma.schedule.findUnique({
     where: { id: scheduleId },
   });
 
   if (!existing) throw new AppError('Schedule not found', 404);
 
+  const examPeriod = normalizeExamPeriod(payload.examPeriod ?? payload.periodName ?? existing.examPeriod);
+  if (!examPeriod) {
+    throw new AppError('Schedule exam period is required before publishing. Use a period such as Midterm or Final.', 400);
+  }
+
+  const semesterId = await getScheduleSemesterId(scheduleId);
+  await validatePublishedSchedulePeriod({ scheduleId, examPeriod, semesterId });
+
   const analysis = await getScheduleAnalysis(scheduleId);
   if (analysis.metrics.totalConflicts > 0) {
     throw new AppError('Cannot publish schedule while hard-constraint issues still exist', 400);
   }
 
-  const publishedConflicts = await getPublishedScheduleConflicts(scheduleId);
+  const publishedConflicts = await getPublishedScheduleConflicts(scheduleId, semesterId);
   if (publishedConflicts.total > 0) {
     throw new AppError('Cannot publish schedule because it conflicts with an existing published schedule.', 400);
   }
 
   const schedule = await prisma.schedule.update({
     where: { id: scheduleId },
-    data: { isFinal: true },
+    data: { isFinal: true, examPeriod },
   });
 
   return { message: 'Schedule published successfully', schedule };

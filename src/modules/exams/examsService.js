@@ -50,7 +50,11 @@ export const generateFromCourses = async (data) => {
   if (!semesterId) throw new AppError('semesterId is required', 400);
   
   const offerings = await prisma.courseOffering.findMany({
-    where: { semesterId },
+    where: {
+      semesterId,
+      courseType: 'COURSE',
+      hasExam: true,
+    },
     include: { exams: true }
   });
   

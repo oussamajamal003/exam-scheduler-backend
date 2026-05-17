@@ -3,7 +3,7 @@ import prisma from '../../config/prisma.js';
 
 const DEMO_PREFIX = 'DEMO-';
 const DEMO_PASSWORD = 'Demo12345!';
-const DEMO_DATASET_KEYS = ['A', 'B', 'C'];
+const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL'];
 
 const departmentTemplates = [
   { name: 'Computer Science', code: 'CS' },
@@ -128,7 +128,99 @@ const datasetProfiles = {
     targetScale: 1.15,
     maxOfferingTarget: 145,
   },
+  REAL: {
+    key: 'REAL',
+    namespace: 'DEMO-REAL',
+    label: 'FEIT Real Dataset',
+    description: 'Real FEIT Spring 2026 course offerings (35 offerings, 29 exams)',
+    semesterName: 'FEIT Spring 2026',
+    semesterStartDate: '2026-06-08',
+    semesterEndDate: '2026-06-22',
+    academicYear: '2025-2026',
+    studentCount: 220,
+    proctorCount: 30,
+    centerCount: 4,
+    roomCount: 12,
+    slotDays: 12,
+    realData: true,
+  },
 };
+
+// Real FEIT Spring 2026 course offerings.
+// programCode owns the course; cohorts list every program whose students enroll.
+// hasExam=false marks PROJECT / LAB-only offerings that must NOT create Exam entities.
+const REAL_PROGRAM_CODES = ['BME', 'CCE', 'CS', 'EE'];
+const realDepartmentTemplates = [
+  { name: 'Biomedical Engineering', code: 'BME' },
+  { name: 'Computer & Communications Engineering', code: 'CCE' },
+  { name: 'Computer Science', code: 'CSE' },
+  { name: 'Electrical Engineering', code: 'ELE' },
+  { name: 'General Sciences', code: 'GEN' },
+];
+const realProgramTemplates = [
+  { name: 'Biomedical Engineering', code: 'BME', departmentCode: 'BME' },
+  { name: 'Computer & Communications Engineering', code: 'CCE', departmentCode: 'CCE' },
+  { name: 'Computer Science', code: 'CS', departmentCode: 'CSE' },
+  { name: 'Electrical Engineering', code: 'EE', departmentCode: 'ELE' },
+];
+const realCenterTemplates = [
+  { code: 'FEIT-A', name: 'FEIT Engineering Hall A', location: 'FEIT Main Campus - Block A' },
+  { code: 'FEIT-B', name: 'FEIT Sciences Building B', location: 'FEIT Main Campus - Block B' },
+  { code: 'FEIT-C', name: 'FEIT Computing Center C', location: 'FEIT Main Campus - Block C' },
+  { code: 'FEIT-D', name: 'FEIT Examination Hall D', location: 'FEIT Main Campus - Examination Wing' },
+];
+const realRoomTemplates = [
+  { centerCode: 'FEIT-A', name: 'Hall A101', capacity: 120 },
+  { centerCode: 'FEIT-A', name: 'Hall A102', capacity: 90 },
+  { centerCode: 'FEIT-A', name: 'Room A203', capacity: 60 },
+  { centerCode: 'FEIT-B', name: 'Hall B105', capacity: 100 },
+  { centerCode: 'FEIT-B', name: 'Hall B106', capacity: 80 },
+  { centerCode: 'FEIT-B', name: 'Room B210', capacity: 50 },
+  { centerCode: 'FEIT-C', name: 'Computing Lab C101', capacity: 45 },
+  { centerCode: 'FEIT-C', name: 'Computing Lab C102', capacity: 45 },
+  { centerCode: 'FEIT-C', name: 'Auditorium C200', capacity: 140 },
+  { centerCode: 'FEIT-D', name: 'Exam Hall D101', capacity: 110 },
+  { centerCode: 'FEIT-D', name: 'Exam Hall D102', capacity: 90 },
+  { centerCode: 'FEIT-D', name: 'Exam Hall D201', capacity: 70 },
+];
+const realOfferings = [
+  { baseCode: 'AUT202L', section: 'A', title: 'Automation Lab', credits: 2, instructor: 'Ibrahim Mallat', day: 'TH', time: '13:00-16:00', type: 'LAB', hasExam: false, programCode: 'EE', cohorts: ['EE', 'CCE'], target: 18, duration: 180 },
+  { baseCode: 'BME332', section: 'A', title: 'Transport Phenomena in BME', credits: 3, instructor: 'Firas Zakaria', day: 'MW', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'BME', cohorts: ['BME'], target: 22, duration: 120 },
+  { baseCode: 'BME371', section: 'A', title: 'Data Evaluation Principles', credits: 3, instructor: 'Mashhour Chakouch', day: 'TTH', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'BME', cohorts: ['BME'], target: 24, duration: 120 },
+  { baseCode: 'BME424', section: 'A', title: 'Image and Signal Processing', credits: 3, instructor: 'Mohamad Khalil', day: 'MW', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'BME', cohorts: ['BME'], target: 18, duration: 120 },
+  { baseCode: 'CHEM221', section: 'A', title: 'General Chemistry', credits: 3, instructor: 'Monzer Awad', day: 'MW', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'BME', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 60, duration: 120 },
+  { baseCode: 'CNE340', section: 'A', title: 'Signals and Systems', credits: 3, instructor: 'Hiba Sheikh', day: 'MW', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'CCE', cohorts: ['CCE', 'EE'], target: 25, duration: 120 },
+  { baseCode: 'CNE460', section: 'A', title: 'Optoelectronics', credits: 3, instructor: 'Ali Harmouch', day: 'TTH', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'CCE', cohorts: ['CCE'], target: 18, duration: 120 },
+  { baseCode: 'COMP201', section: 'A', title: 'Computer Applications', credits: 3, instructor: 'Ranim Sayed', day: 'MW', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 40, duration: 120 },
+  { baseCode: 'COMP201', section: 'B', title: 'Computer Applications', credits: 3, instructor: 'Ranim Sayed', day: 'MW', time: '11:30-13:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 40, duration: 120 },
+  { baseCode: 'CSC203', section: 'A', title: 'Introduction to Programming', credits: 3, instructor: 'Ihab Hassoun', day: 'MW', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE', 'BME'], target: 65, duration: 120 },
+  { baseCode: 'CSC280', section: 'A', title: 'Web Development I', credits: 3, instructor: 'Ahmad Trad', day: 'MW', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE'], target: 35, duration: 120 },
+  { baseCode: 'CSC311', section: 'A', title: 'Operating Systems', credits: 3, instructor: 'Mohamad Saade', day: 'MW', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE'], target: 30, duration: 120 },
+  { baseCode: 'CSC426', section: 'A', title: 'Software Engineering I', credits: 3, instructor: 'Mohamad Saade', day: 'MW', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS'], target: 28, duration: 120 },
+  { baseCode: 'CSC441', section: 'A', title: 'Algorithm Analysis', credits: 3, instructor: 'Ahmad Trad', day: 'MW', time: '11:30-13:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS'], target: 26, duration: 120 },
+  { baseCode: 'ELEC221', section: 'A', title: 'Analog Circuits I', credits: 3, instructor: 'Hiba Sheikh', day: 'MW', time: '10:00-11:30', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['EE', 'CCE', 'BME'], target: 35, duration: 120 },
+  { baseCode: 'ELEC223', section: 'A', title: 'Digital Fundamentals', credits: 3, instructor: 'Ihab Hassoun', day: 'MW', time: '11:30-13:00', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['EE', 'CCE', 'CS'], target: 35, duration: 120 },
+  { baseCode: 'ELEC370', section: 'A', title: 'Electric Power and Machines', credits: 3, instructor: 'Nazih Moubayed', day: 'Fri', time: '14:00-17:00', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['EE'], target: 24, duration: 150 },
+  { baseCode: 'ELEC440L', section: 'A', title: 'Microcontrollers Lab', credits: 3, instructor: 'Ihab Hassoun', day: 'Fri', time: '08:30-11:30', type: 'LAB', hasExam: false, programCode: 'EE', cohorts: ['EE', 'CCE'], target: 22, duration: 180 },
+  { baseCode: 'ENGR211', section: 'A', title: 'Engineering Graphics', credits: 3, instructor: 'Radwan Baroudi', day: 'TTH', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 60, duration: 120 },
+  { baseCode: 'ENGR274', section: 'A', title: 'Engineering Systems Modeling and Simulation', credits: 3, instructor: 'Firas Zakaria', day: 'MW', time: '11:30-13:00', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['EE', 'CCE', 'BME'], target: 40, duration: 120 },
+  { baseCode: 'ENGR444', section: 'A', title: 'Artificial Intelligence', credits: 3, instructor: 'Mohamad Khalil', day: 'MW', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE', 'BME', 'EE'], target: 30, duration: 120 },
+  { baseCode: 'ENGR498', section: 'A', title: 'Engineering Seminar', credits: 3, instructor: 'Ahmad Trad', day: 'TBA', time: 'TBA', type: 'PROJECT', hasExam: false, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 25, duration: 0 },
+  { baseCode: 'FYP594', section: 'A', title: 'Final Year Project Methodology', credits: 1, instructor: 'Firas Zakaria', day: 'T', time: '13:00-14:30', type: 'PROJECT', hasExam: false, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 28, duration: 0 },
+  { baseCode: 'FYP595', section: 'A', title: 'Final Year Project I', credits: 1, instructor: 'Hiba Sheikh', day: 'TBA', time: 'TBA', type: 'PROJECT', hasExam: false, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 22, duration: 0 },
+  { baseCode: 'FYP596', section: 'A', title: 'Final Year Project II', credits: 5, instructor: 'Hiba Sheikh', day: 'TBA', time: 'TBA', type: 'PROJECT', hasExam: false, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 18, duration: 0 },
+  { baseCode: 'IT311', section: 'A', title: 'Network Essentials', credits: 3, instructor: 'Bassel Haj', day: 'TTH', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE'], target: 30, duration: 120 },
+  { baseCode: 'IT381', section: 'A', title: 'Object Oriented Programming', credits: 3, instructor: 'Ahmad Trad', day: 'MW', time: '10:00-11:30', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['CS', 'CCE'], target: 35, duration: 120 },
+  { baseCode: 'MATH104', section: 'A', title: 'Freshman Calculus I', credits: 3, instructor: 'Mohamad Moussa', day: 'MW', time: '11:30-13:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 80, duration: 120 },
+  { baseCode: 'MATH105', section: 'A', title: 'Freshman Calculus II', credits: 3, instructor: 'Salam Kouzayha', day: 'TTH', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 75, duration: 120 },
+  { baseCode: 'MATH202', section: 'A', title: 'Calculus III', credits: 3, instructor: 'Omar Kalaoun', day: 'TTH', time: '14:30-16:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 50, duration: 120 },
+  { baseCode: 'MATH332', section: 'A', title: 'Linear Algebra', credits: 3, instructor: 'Majdi Awad', day: 'TTH', time: '08:30-10:00', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 40, duration: 120 },
+  { baseCode: 'MATH332', section: 'B', title: 'Linear Algebra', credits: 3, instructor: 'Salam Kouzayha', day: 'TTH', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 40, duration: 120 },
+  { baseCode: 'MATH342', section: 'A', title: 'Ordinary Differential Equations', credits: 3, instructor: 'Omar Kalaoun', day: 'Fri', time: '08:30-11:30', type: 'COURSE', hasExam: true, programCode: 'CS', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 35, duration: 150 },
+  { baseCode: 'PHY104', section: 'A', title: 'Freshman Mechanics', credits: 3, instructor: 'Fady Taychouri', day: 'MW', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 80, duration: 120 },
+  { baseCode: 'PHY105', section: 'A', title: 'Freshman Electricity and Magnetism', credits: 3, instructor: 'Ahmad Osman', day: 'TTH', time: '13:00-14:30', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['BME', 'CCE', 'CS', 'EE'], target: 75, duration: 120 },
+  { baseCode: 'PHY205', section: 'A', title: 'Electricity and Magnetism', credits: 3, instructor: 'Ali Harmouch', day: 'TTH', time: '10:00-11:30', type: 'COURSE', hasExam: true, programCode: 'EE', cohorts: ['BME', 'CCE', 'EE'], target: 45, duration: 120 },
+];
 
 const firstNames = ['Layla', 'Omar', 'Sara', 'Adam', 'Nour', 'Yara', 'Karim', 'Maya', 'Ziad', 'Rana', 'Tala', 'Fadi', 'Hala', 'Samir', 'Dina', 'Nadia', 'Bilal', 'Lina', 'Rami', 'Mona', 'Jad', 'Salma', 'Elias', 'Farah', 'Amir', 'Celine', 'Malek', 'Reem', 'Kareem', 'Aya'];
 const lastNames = ['Ahmed', 'Hassan', 'Khalil', 'Nasser', 'Mansour', 'Saleh', 'Fouad', 'Issa', 'Rahman', 'Darwish', 'Youssef', 'Karam', 'Othman', 'Nasr', 'Farah', 'Haddad', 'Sami', 'Omar', 'Zein', 'Amin', 'Habib', 'Tarek', 'Nour', 'Kamal', 'Zaki', 'Riad', 'Hani', 'Adel', 'Mourad', 'Basel'];
@@ -143,26 +235,57 @@ const buildStudentUniversityId = (namespace, index) => `${namespace}-STU-${Strin
 
 const normalizeDatasetKey = (input) => {
   if (typeof input === 'string' && datasetProfiles[input]) return input;
+  if (typeof input === 'string' && datasetProfiles[input?.toUpperCase?.()]) return input.toUpperCase();
   if (input === 'clean' || input === 'feasible' || input === 'balanced') return 'A';
   if (input === 'expanded' || input === 'large') return 'B';
   if (input === 'enterprise' || input === 'xl') return 'C';
+  if (input === 'real' || input === 'feit' || input === 'university') return 'REAL';
   return 'A';
 };
 
 const getProfile = (datasetKey) => datasetProfiles[normalizeDatasetKey(datasetKey)];
 
-const buildDepartmentSpecs = (profile) => departmentTemplates.map((item) => ({
-  code: `${profile.namespace}-DEPT-${item.code}`,
-  name: `${item.name} (${profile.label})`,
+const buildDepartmentSpecs = (profile) => {
+  const templates = profile.realData ? realDepartmentTemplates : departmentTemplates;
+  return templates.map((item) => ({
+    code: `${profile.namespace}-DEPT-${item.code}`,
+    name: profile.realData ? item.name : `${item.name} (${profile.label})`,
+  }));
+};
+
+const buildProgramSpecs = (profile) => {
+  const templates = profile.realData ? realProgramTemplates : programTemplates;
+  return templates.map((item) => ({
+    code: `${profile.namespace}-PROG-${item.code}`,
+    name: profile.realData ? item.name : `${item.name} (${profile.label})`,
+    departmentCode: `${profile.namespace}-DEPT-${item.departmentCode}`,
+  }));
+};
+
+const buildRealOfferingPlans = (profile) => realOfferings.map((offering) => ({
+  baseCode: offering.baseCode,
+  section: offering.section,
+  code: `${profile.namespace}-${offering.baseCode}-${offering.section}`,
+  courseKey: `${profile.namespace}-${offering.baseCode}`,
+  title: offering.title,
+  programCode: `${profile.namespace}-PROG-${offering.programCode}`,
+  cohorts: offering.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
+  target: offering.target,
+  duration: offering.duration,
+  credits: offering.credits,
+  instructor: offering.instructor,
+  day: offering.day,
+  time: offering.time,
+  type: offering.type,
+  hasExam: offering.hasExam,
+  priority: offering.hasExam ? 70 : 30,
+  difficulty: offering.hasExam ? 6 : 3,
+  notes: `${profile.label} - ${offering.type} - ${offering.day} ${offering.time}`,
 }));
 
-const buildProgramSpecs = (profile) => programTemplates.map((item) => ({
-  code: `${profile.namespace}-PROG-${item.code}`,
-  name: `${item.name} (${profile.label})`,
-  departmentCode: `${profile.namespace}-DEPT-${item.departmentCode}`,
-}));
-
-const buildOfferingPlans = (profile) => Array.from({ length: profile.offeringCount }, (_, index) => {
+const buildOfferingPlans = (profile) => {
+  if (profile.realData) return buildRealOfferingPlans(profile);
+  return Array.from({ length: profile.offeringCount }, (_, index) => {
   const template = courseTemplates[index % courseTemplates.length];
   const cycle = Math.floor(index / courseTemplates.length);
   const variant = cycle === 0 ? '' : ` ${courseTitleVariants[(cycle - 1) % courseTitleVariants.length]}`;
@@ -182,14 +305,31 @@ const buildOfferingPlans = (profile) => Array.from({ length: profile.offeringCou
     difficulty: Math.min(10, template.difficulty + (cycle % 2)),
   };
 });
+};
 
-const buildCenterSpecs = (profile) => Array.from({ length: profile.centerCount }, (_, index) => ({
-  code: `${profile.namespace}-CENTER-${String(index + 1).padStart(2, '0')}`,
-  name: `${centerNamePool[index]} (${profile.label})`,
-  location: `Campus ${index + 1} - ${profile.label}`,
-}));
+const buildCenterSpecs = (profile) => {
+  if (profile.realData) {
+    return realCenterTemplates.map((center) => ({
+      code: `${profile.namespace}-CENTER-${center.code}`,
+      name: center.name,
+      location: center.location,
+    }));
+  }
+  return Array.from({ length: profile.centerCount }, (_, index) => ({
+    code: `${profile.namespace}-CENTER-${String(index + 1).padStart(2, '0')}`,
+    name: `${centerNamePool[index]} (${profile.label})`,
+    location: `Campus ${index + 1} - ${profile.label}`,
+  }));
+};
 
 const buildRoomPlans = (profile, centers) => {
+  if (profile.realData) {
+    return realRoomTemplates.map((room) => ({
+      centerCode: `${profile.namespace}-CENTER-${room.centerCode}`,
+      name: room.name,
+      capacity: room.capacity,
+    }));
+  }
   const roomPlans = [];
   const roomsPerCenter = Math.floor(profile.roomCount / centers.length);
   const extraRooms = profile.roomCount % centers.length;
@@ -433,19 +573,23 @@ const createSemester = async (tx, profile) => tx.semester.create({
 const createCourses = async (tx, profile, programByCode, semester, offeringPlans) => {
   const map = new Map();
   for (const plan of offeringPlans) {
+    const courseKey = plan.courseKey ?? plan.code;
+    if (map.has(courseKey)) continue;
     const row = await tx.course.create({
       data: {
-        code: plan.code,
+        code: courseKey,
         title: plan.title,
         programId: programByCode.get(plan.programCode).id,
         semesterId: semester.id,
-        credits: 3,
-        description: `${profile.label} course seeded for feasible hybrid exam scheduling.`,
+        credits: plan.credits ?? 3,
+        description: profile.realData
+          ? `${plan.title} (${plan.baseCode ?? courseKey}) - real FEIT offering.`
+          : `${profile.label} course seeded for feasible hybrid exam scheduling.`,
         isActive: true,
         createdBy: buildCreatedBy(profile.key),
       },
     });
-    map.set(plan.code, row);
+    map.set(courseKey, row);
   }
   return map;
 };
@@ -453,20 +597,23 @@ const createCourses = async (tx, profile, programByCode, semester, offeringPlans
 const createCourseOfferings = async (tx, profile, courseByCode, semester, offeringPlans) => {
   const map = new Map();
   for (const [index, plan] of offeringPlans.entries()) {
+    const courseKey = plan.courseKey ?? plan.code;
     const row = await tx.courseOffering.create({
       data: {
-        courseId: courseByCode.get(plan.code).id,
+        courseId: courseByCode.get(courseKey).id,
         semesterId: semester.id,
-        section: 'A',
-        instructor: instructorNames[index % instructorNames.length],
+        section: plan.section ?? 'A',
+        instructor: plan.instructor ?? instructorNames[index % instructorNames.length],
         expectedStudents: plan.target,
         capacity: Math.max(plan.target + 12, 40),
-        day: ['Monday', 'Tuesday', 'Wednesday', 'Thursday'][index % 4],
-        time: ['09:00', '11:00', '13:00', '15:00'][index % 4],
+        day: plan.day ?? ['Monday', 'Tuesday', 'Wednesday', 'Thursday'][index % 4],
+        time: plan.time ?? ['09:00', '11:00', '13:00', '15:00'][index % 4],
         roomLabel: 'Assigned by hybrid scheduler',
-        notes: `${profile.label} feasible course offering for demo scheduling.`,
+        notes: plan.notes ?? `${profile.label} feasible course offering for demo scheduling.`,
         priority: plan.priority,
         difficulty: plan.difficulty,
+        courseType: plan.hasExam === false ? 'PROJECT' : 'COURSE',
+        hasExam: plan.hasExam !== false,
         status: 'ACTIVE',
         createdBy: buildCreatedBy(profile.key),
       },
@@ -514,7 +661,7 @@ const createCentersAndRooms = async (tx, profile) => {
 const createStudents = async (tx, profile, programByCode, passwordHash) => {
   const students = [];
   const programCodes = buildProgramSpecs(profile).map((program) => program.code);
-  const studentsPerProgram = profile.studentCount / programCodes.length;
+  const studentsPerProgram = Math.max(1, profile.studentCount / programCodes.length);
 
   for (let index = 0; index < profile.studentCount; index += 1) {
     const programCode = programCodes[Math.floor(index / studentsPerProgram)] ?? programCodes[programCodes.length - 1];
@@ -586,6 +733,7 @@ const createProctors = async (tx, profile, centerByCode, passwordHash, timeSlots
 
 const createExams = async (tx, profile, offeringByCode, offeringPlans) => {
   for (const plan of offeringPlans) {
+    if (plan.hasExam === false) continue;
     await tx.exam.create({
       data: {
         courseOfferingId: offeringByCode.get(plan.code).id,
@@ -599,11 +747,15 @@ const createExams = async (tx, profile, offeringByCode, offeringPlans) => {
 
 const createRegistrations = async (tx, students, offeringByCode, offeringPlans) => {
   const data = [];
+  const seen = new Set();
 
   for (const [index, plan] of offeringPlans.entries()) {
     const offering = offeringByCode.get(plan.code);
     const selected = selectStudents(students, plan.cohorts, plan.target, index * 11);
     for (const student of selected) {
+      const key = `${student.id}:${offering.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       data.push({ studentId: student.id, courseOfferingId: offering.id, status: 'ACTIVE' });
     }
   }
@@ -616,14 +768,20 @@ const createRegistrations = async (tx, students, offeringByCode, offeringPlans) 
   return data.length;
 };
 
-const getExpectedTestCases = (profile) => ({
-  dataset: `${profile.label} - ${profile.description}`,
-  expectedResult: 'Hybrid schedule generation should complete cleanly with all hard constraints satisfied.',
-  offerings: `${profile.offeringCount} active course offerings seeded for ${profile.semesterName}.`,
-  rooms: `${profile.roomCount} available rooms distributed across ${profile.centerCount} centers with large-capacity halls for high-demand exams.`,
-  proctors: `${profile.proctorCount} proctors are available across the full time-slot grid to keep the dataset feasible.`,
-  timeSlots: `${profile.slotDays * slotSessions.length} valid 180-minute time slots are available inside the semester exam window.`,
-});
+const getExpectedTestCases = (profile, offeringPlans = []) => {
+  const offeringCount = offeringPlans.length || profile.offeringCount || 0;
+  const examCount = offeringPlans.length
+    ? offeringPlans.filter((plan) => plan.hasExam !== false).length
+    : offeringCount;
+  return {
+    dataset: `${profile.label} - ${profile.description}`,
+    expectedResult: 'Hybrid schedule generation should complete cleanly with all hard constraints satisfied.',
+    offerings: `${offeringCount} active course offerings seeded for ${profile.semesterName} (${examCount} producing exams; PROJECT and LAB-only offerings are excluded).`,
+    rooms: `${profile.roomCount} available rooms distributed across ${profile.centerCount} centers with large-capacity halls for high-demand exams.`,
+    proctors: `${profile.proctorCount} proctors are available across the full time-slot grid to keep the dataset feasible.`,
+    timeSlots: `${profile.slotDays * slotSessions.length} valid 180-minute time slots are available inside the semester exam window.`,
+  };
+};
 
 export const generateDemoData = async (options = {}) => {
   const profile = getProfile(options.dataset ?? options.mode);
@@ -654,7 +812,7 @@ export const generateDemoData = async (options = {}) => {
     summary: await countDemoData(profile.key),
     overallSummary: await countDemoData(),
     instruction: `Select ${profile.semesterName} in the scheduler and run the Hybrid Constraint-Based Scheduling Algorithm to produce a clean schedule.`,
-    expectedTestCases: getExpectedTestCases(profile),
+    expectedTestCases: getExpectedTestCases(profile, offeringPlans),
     generatedRegistrations: registrationCount,
   };
 };

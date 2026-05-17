@@ -67,10 +67,14 @@ export const getById = async (id) => {
 };
 
 export const create = async (data, user) => {
+  if (data.isFinal === true) {
+    throw new AppError('Schedules must be published through the publish action.', 400);
+  }
+
   return prisma.schedule.create({
     data: {
       name: data.name,
-      isFinal: data.isFinal ?? false,
+      isFinal: false,
       createdBy: user?.id,
     },
     include: scheduleInclude,
@@ -79,6 +83,10 @@ export const create = async (data, user) => {
 
 export const update = async (id, data) => {
   const existing = await getById(id);
+
+  if (data.isFinal === true) {
+    throw new AppError('Schedules must be published through the publish action.', 400);
+  }
 
   if (existing.isFinal && data.name !== undefined) {
     throw new AppError(
