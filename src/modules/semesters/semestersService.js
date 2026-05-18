@@ -25,16 +25,13 @@ export const getAll = async (query = {}) => {
   if (query.search) {
     where.name = { contains: query.search, mode: 'insensitive' };
   }
-  if (query.isActive !== undefined) {
-    where.isActive = query.isActive === 'true' || query.isActive === true;
-  }
 
   const [data, total] = await Promise.all([
     prisma.semester.findMany({
       where,
       skip,
       take: limit,
-      orderBy: [{ isActive: 'desc' }, { startDate: 'desc' }],
+      orderBy: [{ startDate: 'desc' }],
       include: semesterInclude,
     }),
     prisma.semester.count({ where }),
@@ -56,32 +53,20 @@ export const getById = async (id) => {
 };
 
 export const create = async (data) => {
-  return await prisma.$transaction(async (tx) => {
-    if (data.isActive) {
-      await tx.semester.updateMany({ where: {}, data: { isActive: false } });
-    }
-
-    return await tx.semester.create({
-      data,
-      include: semesterInclude,
-    });
+  return await prisma.semester.create({
+    data,
+    include: semesterInclude,
   });
 };
 
 export const update = async (id, data) => {
-  return await prisma.$transaction(async (tx) => {
-    const current = await tx.semester.findUnique({ where: { id } });
-    if (!current) throw new AppError('Semester not found', 404);
+  const current = await prisma.semester.findUnique({ where: { id } });
+  if (!current) throw new AppError('Semester not found', 404);
 
-    if (data.isActive) {
-      await tx.semester.updateMany({ where: { id: { not: id } }, data: { isActive: false } });
-    }
-
-    return await tx.semester.update({
-      where: { id },
-      data,
-      include: semesterInclude,
-    });
+  return await prisma.semester.update({
+    where: { id },
+    data,
+    include: semesterInclude,
   });
 };
 

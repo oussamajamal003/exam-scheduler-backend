@@ -44,6 +44,11 @@ import timeSlotRoutes from './modules/timeslots/timeslotsRoutes.js';
 import enrollmentRoutes from './modules/enrollments/enrollmentsRoutes.js';
 import aiRoutes from './modules/ai/aiRoutes.js';
 import demoDataRoutes from './modules/demoData/demoDataRoutes.js';
+import searchRoutes from './modules/search/searchRoutes.js';
+import roleDashboardRoutes from './modules/roleDashboards/roleDashboardsRoutes.js';
+import studentNotificationRoutes from './modules/studentNotifications/studentNotificationsRoutes.js';
+import studentPortalRoutes from './modules/studentPortal/studentPortalRoutes.js';
+import proctorPortalRoutes from './modules/proctorPortal/proctorPortalRoutes.js';
 
 // Routes (existing)
 app.use('/api/auth', authRoutes);
@@ -65,6 +70,11 @@ app.use('/api/timeslots', timeSlotRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/demo-data', demoDataRoutes);
+app.use('/api/search', searchRoutes);
+app.use('/api/role-dashboards', roleDashboardRoutes);
+app.use('/api/student-notifications', studentNotificationRoutes);
+app.use('/api/student', studentPortalRoutes);
+app.use('/api/proctor', proctorPortalRoutes);
 
 // Compatibility aliases for the first scheduling prototype API surface.
 app.post('/generate-schedule', authenticate, roleGuard(['ADMIN']), validate(generateScheduleSchema), generateSchedule);

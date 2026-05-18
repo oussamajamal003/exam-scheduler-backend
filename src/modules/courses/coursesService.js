@@ -26,8 +26,6 @@ export const getAll = async (query = {}) => {
         semester: true,
         courseOfferings: {
           orderBy: [
-            { semester: { isCurrent: 'desc' } },
-            { semester: { isActive: 'desc' } },
             { createdAt: 'desc' },
           ],
           take: 1,
@@ -67,8 +65,6 @@ const courseInclude = {
   semester: true,
   courseOfferings: {
     orderBy: [
-      { semester: { isCurrent: 'desc' } },
-      { semester: { isActive: 'desc' } },
       { createdAt: 'desc' },
     ],
     take: 1,

@@ -562,10 +562,7 @@ const createSemester = async (tx, profile) => tx.semester.create({
     name: profile.semesterName,
     startDate: toDate(profile.semesterStartDate, '00:00'),
     endDate: toDate(profile.semesterEndDate, '23:59'),
-    isActive: true,
-    isCurrent: profile.key === 'A',
     academicYear: profile.academicYear,
-    status: profile.key === 'A' ? 'ACTIVE' : 'UPCOMING',
     createdBy: buildCreatedBy(profile.key),
   },
 });

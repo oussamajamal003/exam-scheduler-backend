@@ -1,5 +1,9 @@
 ﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import {
+  createSchedulePublicationNotifications,
+  NOTIFICATION_TYPES,
+} from '../notifications/notificationsService.js';
 import { extractAvailableTimeSlotIds } from '../proctors/proctorAvailability.js';
 
 const DEFAULT_EXAM_DURATION = 120;
@@ -2863,6 +2867,11 @@ export const publishSchedule = async (scheduleId, payload = {}) => {
     where: { id: scheduleId },
     data: { isFinal: true, examPeriod },
   });
+
+  const notificationType = existing.isFinal
+    ? NOTIFICATION_TYPES.SCHEDULE_UPDATED
+    : NOTIFICATION_TYPES.SCHEDULE_PUBLISHED;
+  await createSchedulePublicationNotifications({ scheduleId, notificationType });
 
   return { message: 'Schedule published successfully', schedule };
 };

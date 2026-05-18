@@ -30,3 +30,20 @@ export const roleGuard = (allowedRoles) => {
     next();
   };
 };
+
+export const strictRoleGuard = (allowedRoles) => {
+  const normalizedAllowedRoles = new Set(allowedRoles.map(normalizeRole).filter(Boolean));
+
+  return (req, res, next) => {
+    const userRole = normalizeRole(req.user?.role);
+
+    if (!userRole || !normalizedAllowedRoles.has(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You do not have the required permissions.',
+      });
+    }
+
+    next();
+  };
+};
