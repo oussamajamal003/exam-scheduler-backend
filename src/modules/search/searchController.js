@@ -6,6 +6,7 @@ export const search = catchAsync(async (req, res) => {
   const result = await service.globalSearch({
     q: req.query.q,
     limit: req.query.limit,
+    user: req.user,
   });
   sendResponse(res, 200, 'search results', result);
 });

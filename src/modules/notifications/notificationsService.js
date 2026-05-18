@@ -176,6 +176,27 @@ const createNotifications = async (rows) => {
   return { count: result.count };
 };
 
+const preferenceKeyByType = {
+  [NOTIFICATION_TYPES.SCHEDULE_PUBLISHED]: 'schedulePublishedNotifications',
+  [NOTIFICATION_TYPES.SCHEDULE_UPDATED]: 'examAssignmentUpdates',
+  [NOTIFICATION_TYPES.NEW_DUTY_ASSIGNED]: 'examAssignmentUpdates',
+  [NOTIFICATION_TYPES.ROOM_TIME_CHANGE]: 'roomTimeChanges',
+  [NOTIFICATION_TYPES.ANNOUNCEMENT]: 'announcementsMessages',
+};
+
+const filterRowsByPreferences = async (rows, type) => {
+  const preferenceKey = preferenceKeyByType[type];
+  if (!preferenceKey || rows.length === 0) return rows;
+
+  const settings = await prisma.userSettings.findMany({
+    where: { userId: { in: rows.map((row) => row.userId) } },
+    select: { userId: true, [preferenceKey]: true },
+  });
+
+  const preferencesByUserId = new Map(settings.map((setting) => [setting.userId, setting[preferenceKey]]));
+  return rows.filter((row) => preferencesByUserId.get(row.userId) !== false);
+};
+
 export const createSchedulePublicationNotifications = async ({ scheduleId, notificationType }) => {
   const schedule = await prisma.schedule.findUnique({
     where: { id: scheduleId },
@@ -242,9 +263,14 @@ export const createSchedulePublicationNotifications = async ({ scheduleId, notif
     metadata: buildScheduleMetadata(schedule, 'PROCTOR', entries),
   }));
 
+  const [filteredStudentNotifications, filteredProctorNotifications] = await Promise.all([
+    filterRowsByPreferences(studentNotifications, type),
+    filterRowsByPreferences(proctorNotifications, type),
+  ]);
+
   const [studentResult, proctorResult] = await Promise.all([
-    createNotifications(studentNotifications),
-    createNotifications(proctorNotifications),
+    createNotifications(filteredStudentNotifications),
+    createNotifications(filteredProctorNotifications),
   ]);
 
   return {

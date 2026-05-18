@@ -1,4 +1,6 @@
 import prisma from '../../config/prisma.js';
+import * as roleDashboardService from '../roleDashboards/roleDashboardsService.js';
+import { normalizeRole } from '../../guards/roleGuard.js';
 
 /**
  * Global search across the scheduling system.
@@ -165,13 +167,323 @@ const formatSchedule = (s) => ({
   metadata: { isFinal: !!s.isFinal, stage: s.generationStage, quality: s.qualityScore },
 });
 
-export const globalSearch = async ({ q, limit }) => {
+const includesQuery = (query, ...values) => {
+  const normalized = query.toLowerCase();
+  return values.some((value) => typeof value === 'string' && value.toLowerCase().includes(normalized));
+};
+
+const limitItems = (items, limit) => items.slice(0, limit);
+
+const uniqueResults = (items, getKey) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = getKey(item);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const formatRoleCourse = (course, href, subtitle) => ({
+  id: course.id,
+  type: 'course',
+  title: `${course.code} — ${course.title}`,
+  subtitle,
+  badge: 'Course',
+  icon: 'book-open',
+  href,
+  metadata: { code: course.code },
+});
+
+const formatRoleExam = ({ id, title, subtitle, href, badge = 'Exam' }) => ({
+  id,
+  type: 'exam',
+  title,
+  subtitle,
+  badge,
+  icon: 'clipboard-check',
+  href,
+});
+
+const formatRoleStudent = (student, href) => ({
+  id: student.id,
+  type: 'student',
+  title: student.user?.name ?? 'Student',
+  subtitle: [student.universityId, student.user?.email, student.program?.name].filter(Boolean).join(' • '),
+  badge: 'Student',
+  icon: 'graduation-cap',
+  href,
+  metadata: { universityId: student.universityId },
+});
+
+const formatRoleRoom = ({ id, name, center, capacity, status, href }) => ({
+  id,
+  type: 'room',
+  title: name,
+  subtitle: [center?.name, typeof capacity === 'number' ? `Capacity ${capacity}` : null].filter(Boolean).join(' • '),
+  badge: status ?? 'Room',
+  icon: 'building-2',
+  href,
+});
+
+const formatRoleCenter = ({ id, name, location, href }) => ({
+  id,
+  type: 'center',
+  title: name,
+  subtitle: location ?? 'Center',
+  badge: 'Center',
+  icon: 'building',
+  href,
+});
+
+const formatRoleSchedule = ({ id, name, examPeriod, assignmentCount, href }) => ({
+  id,
+  type: 'schedule',
+  title: name,
+  subtitle: ['Published', typeof assignmentCount === 'number' ? `${assignmentCount} assignments` : null, examPeriod].filter(Boolean).join(' • '),
+  badge: 'Published',
+  icon: 'calendar-clock',
+  href,
+});
+
+const buildStudentSearch = async ({ user, query, perGroup }) => {
+  const dashboard = await roleDashboardService.getStudentDashboard(user);
+  const courseResults = limitItems(
+    dashboard.courses
+      .filter((courseOffering) => includesQuery(
+        query,
+        courseOffering.course?.code,
+        courseOffering.course?.title,
+        courseOffering.semester?.name,
+        courseOffering.instructor,
+        courseOffering.section,
+      ))
+      .map((courseOffering) => formatRoleCourse(
+        courseOffering.course,
+        '/student/courses',
+        [courseOffering.semester?.name, courseOffering.section ? `Section ${courseOffering.section}` : null].filter(Boolean).join(' • '),
+      )),
+    perGroup
+  );
+
+  const examResults = limitItems(
+    dashboard.exams
+      .filter((exam) => includesQuery(
+        query,
+        exam.courseOffering?.course?.code,
+        exam.courseOffering?.course?.title,
+        exam.courseOffering?.semester?.name,
+        exam.assignments[0]?.room?.name,
+        exam.assignments[0]?.room?.center?.name,
+      ))
+      .map((exam) => formatRoleExam({
+        id: exam.id,
+        title: exam.courseOffering?.course
+          ? `${exam.courseOffering.course.code} — ${exam.courseOffering.course.title}`
+          : 'Exam',
+        subtitle: [
+          exam.courseOffering?.semester?.name,
+          exam.assignments[0]?.room?.name,
+          exam.assignments[0]?.room?.center?.name,
+        ].filter(Boolean).join(' • '),
+        href: '/student/schedule',
+        badge: exam.status ?? 'Exam',
+      })),
+    perGroup
+  );
+
+  const scheduleResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(
+          query,
+          assignment.schedule?.name,
+          assignment.schedule?.examPeriod,
+          assignment.exam?.courseOffering?.course?.code,
+          assignment.room?.name,
+          assignment.room?.center?.name,
+        ))
+        .map((assignment) => ({
+          id: assignment.schedule?.id,
+          name: assignment.schedule?.name,
+          examPeriod: assignment.schedule?.examPeriod,
+          assignmentCount: 1,
+          href: '/student/schedule',
+        }))
+        .filter((schedule) => schedule.id),
+      (schedule) => schedule.id
+    ).map(formatRoleSchedule),
+    perGroup
+  );
+
+  const roomResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(query, assignment.room?.name, assignment.room?.center?.name))
+        .map((assignment) => ({
+          id: assignment.room?.id,
+          name: assignment.room?.name,
+          center: assignment.room?.center,
+          capacity: assignment.room?.capacity,
+          status: assignment.room?.status,
+          href: '/student/schedule',
+        }))
+        .filter((room) => room.id),
+      (room) => room.id
+    ).map(formatRoleRoom),
+    perGroup
+  );
+
+  const centerResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(query, assignment.room?.center?.name, assignment.room?.center?.location))
+        .map((assignment) => ({
+          id: assignment.room?.center?.id,
+          name: assignment.room?.center?.name,
+          location: assignment.room?.center?.location,
+          href: '/student/schedule',
+        }))
+        .filter((center) => center.id),
+      (center) => center.id
+    ).map(formatRoleCenter),
+    perGroup
+  );
+
+  return [
+    { key: 'academic', label: 'Academic', items: [...courseResults, ...examResults] },
+    { key: 'scheduling', label: 'Scheduling', items: scheduleResults },
+    { key: 'resources', label: 'Resources', items: [...roomResults, ...centerResults] },
+  ].filter((group) => group.items.length > 0);
+};
+
+const buildProctorSearch = async ({ user, query, perGroup }) => {
+  const dashboard = await roleDashboardService.getProctorDashboard(user);
+  const courseResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(
+          query,
+          assignment.exam?.courseOffering?.course?.code,
+          assignment.exam?.courseOffering?.course?.title,
+          assignment.exam?.courseOffering?.semester?.name,
+        ))
+        .map((assignment) => assignment.exam?.courseOffering?.course)
+        .filter(Boolean),
+      (course) => course.id
+    ).map((course) => formatRoleCourse(course, '/proctor/schedule', 'Assigned duty course')),
+    perGroup
+  );
+
+  const dutyResults = limitItems(
+    dashboard.assignments
+      .filter((assignment) => includesQuery(
+        query,
+        assignment.exam?.courseOffering?.course?.code,
+        assignment.exam?.courseOffering?.course?.title,
+        assignment.room?.name,
+        assignment.room?.center?.name,
+        assignment.schedule?.name,
+      ))
+      .map((assignment) => formatRoleExam({
+        id: assignment.id,
+        title: assignment.exam?.courseOffering?.course
+          ? `${assignment.exam.courseOffering.course.code} — ${assignment.exam.courseOffering.course.title}`
+          : 'Assigned duty',
+        subtitle: [assignment.room?.name, assignment.room?.center?.name, assignment.schedule?.name].filter(Boolean).join(' • '),
+        href: '/proctor/schedule',
+        badge: 'Duty',
+      })),
+    perGroup
+  );
+
+  const studentResults = limitItems(
+    dashboard.relatedStudents
+      .filter((student) => includesQuery(query, student.user?.name, student.user?.email, student.universityId, student.program?.name))
+      .map((student) => formatRoleStudent(student, '/proctor/students')),
+    perGroup
+  );
+
+  const scheduleResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(query, assignment.schedule?.name, assignment.schedule?.examPeriod))
+        .map((assignment) => ({
+          id: assignment.schedule?.id,
+          name: assignment.schedule?.name,
+          examPeriod: assignment.schedule?.examPeriod,
+          assignmentCount: 1,
+          href: '/proctor/schedule',
+        }))
+        .filter((schedule) => schedule.id),
+      (schedule) => schedule.id
+    ).map(formatRoleSchedule),
+    perGroup
+  );
+
+  const roomResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(query, assignment.room?.name, assignment.room?.center?.name))
+        .map((assignment) => ({
+          id: assignment.room?.id,
+          name: assignment.room?.name,
+          center: assignment.room?.center,
+          capacity: assignment.room?.capacity,
+          status: assignment.room?.status,
+          href: '/proctor/schedule',
+        }))
+        .filter((room) => room.id),
+      (room) => room.id
+    ).map(formatRoleRoom),
+    perGroup
+  );
+
+  const centerResults = limitItems(
+    uniqueResults(
+      dashboard.assignments
+        .filter((assignment) => includesQuery(query, assignment.room?.center?.name, assignment.room?.center?.location))
+        .map((assignment) => ({
+          id: assignment.room?.center?.id,
+          name: assignment.room?.center?.name,
+          location: assignment.room?.center?.location,
+          href: '/proctor/schedule',
+        }))
+        .filter((center) => center.id),
+      (center) => center.id
+    ).map(formatRoleCenter),
+    perGroup
+  );
+
+  return [
+    { key: 'academic', label: 'Academic', items: [...courseResults, ...dutyResults] },
+    { key: 'users', label: 'Users', items: studentResults },
+    { key: 'scheduling', label: 'Scheduling', items: scheduleResults },
+    { key: 'resources', label: 'Resources', items: [...roomResults, ...centerResults] },
+  ].filter((group) => group.items.length > 0);
+};
+
+export const globalSearch = async ({ q, limit, user }) => {
   const query = (q ?? '').trim();
   if (!query) {
     return { groups: [], total: 0, query: '' };
   }
 
   const perGroup = safeLimit(limit, 5, 10);
+  const role = normalizeRole(user?.role);
+
+  if (role === 'STUDENT') {
+    const groups = await buildStudentSearch({ user, query, perGroup });
+    const total = groups.reduce((acc, group) => acc + group.items.length, 0);
+    return { groups, total, query };
+  }
+
+  if (role === 'PROCTOR') {
+    const groups = await buildProctorSearch({ user, query, perGroup });
+    const total = groups.reduce((acc, group) => acc + group.items.length, 0);
+    return { groups, total, query };
+  }
+
   const contains = containsInsensitive(query);
 
   const [

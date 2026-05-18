@@ -22,6 +22,16 @@ export const getNotifications = catchAsync(async (req, res) => {
   sendResponse(res, 200, 'Proctor notifications retrieved', result);
 });
 
+export const markNotificationRead = catchAsync(async (req, res) => {
+  const result = await service.markNotificationRead(req.user, req.params.id);
+  sendResponse(res, 200, 'Notification marked as read', result);
+});
+
+export const markAllNotificationsRead = catchAsync(async (req, res) => {
+  const result = await service.markAllNotificationsRead(req.user);
+  sendResponse(res, 200, 'Notifications marked as read', result);
+});
+
 export const getPublishedSchedules = catchAsync(async (_req, res) => {
   const result = await service.getPublishedSchedules();
   sendResponse(res, 200, 'Published schedules retrieved', result);

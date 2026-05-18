@@ -77,5 +77,7 @@ export const getAssignedStudents = async (user) => {
 };
 
 export const getNotifications = async (user, query) => notificationsService.listForUser(user, query);
+export const markNotificationRead = async (user, notificationId) => notificationsService.markReadForUser(user, notificationId);
+export const markAllNotificationsRead = async (user) => notificationsService.markAllReadForUser(user);
 
 export const getPublishedSchedules = async () => roleDashboardService.getPublishedSchedulesForRole();

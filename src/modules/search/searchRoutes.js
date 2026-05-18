@@ -6,6 +6,6 @@ import * as controller from './searchController.js';
 const router = express.Router();
 router.use(authenticate);
 
-router.get('/', roleGuard(['ADMIN']), controller.search);
+router.get('/', roleGuard(['ADMIN', 'STUDENT', 'PROCTOR']), controller.search);
 
 export default router;

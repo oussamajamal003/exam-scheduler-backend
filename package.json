@@ -20,6 +20,7 @@
     "express": "^4.22.1",
     "jsonwebtoken": "^9.0.3",
     "livereload": "^0.10.3",
+    "pdfkit": "^0.18.0",
     "pg": "^8.20.0",
     "swagger-autogen": "^2.23.7",
     "swagger-jsdoc": "^6.2.8",
