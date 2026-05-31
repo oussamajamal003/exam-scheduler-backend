@@ -1,6 +1,8 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+// Lean assignment select — no nested student registrations. Use this for all
+// dashboard/search queries to prevent O(students × assignments) payloads.
 const assignmentSelect = {
   id: true,
   scheduleId: true,
@@ -22,21 +24,6 @@ const assignmentSelect = {
           expectedStudents: true,
           course: { select: { id: true, code: true, title: true, credits: true } },
           semester: { select: { id: true, name: true, startDate: true, endDate: true } },
-          registrations: {
-            select: {
-              id: true,
-              studentId: true,
-              status: true,
-              student: {
-                select: {
-                  id: true,
-                  universityId: true,
-                  user: { select: { id: true, name: true, email: true } },
-                  program: { select: { id: true, name: true, code: true } },
-                },
-              },
-            },
-          },
         },
       },
     },
@@ -55,12 +42,51 @@ const assignmentSelect = {
       id: true,
       department: true,
       user: { select: { id: true, name: true, email: true } },
-      center: { select: { id: true, name: true, location: true } },
     },
   },
   timeSlot: { select: { id: true, date: true, startTime: true, endTime: true, duration: true } },
 };
 
+// Proctor assignment select — extends the lean select with student registrations
+// so the Assigned Students page can render the per-exam roster.
+const proctorAssignmentSelect = {
+  ...assignmentSelect,
+  exam: {
+    select: {
+      id: true,
+      status: true,
+      duration: true,
+      courseOffering: {
+        select: {
+          id: true,
+          section: true,
+          instructor: true,
+          expectedStudents: true,
+          course: { select: { id: true, code: true, title: true, credits: true } },
+          semester: { select: { id: true, name: true, startDate: true, endDate: true } },
+          registrations: {
+            select: {
+              id: true,
+              status: true,
+              studentId: true,
+              student: {
+                select: {
+                  id: true,
+                  universityId: true,
+                  user: { select: { id: true, name: true, email: true } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+// Published schedule select — no inline assignments, only a count.
+// Role portals that need full assignment details should call the dedicated
+// schedule/assignments endpoint for the selected schedule.
 const publishedScheduleSelect = {
   id: true,
   name: true,
@@ -69,9 +95,6 @@ const publishedScheduleSelect = {
   createdAt: true,
   updatedAt: true,
   _count: { select: { assignments: true } },
-  assignments: {
-    select: assignmentSelect,
-  },
 };
 
 const getDateValue = (assignment) => {
@@ -226,10 +249,9 @@ export const getProctorDashboard = async (user) => {
       department: true,
       maxExamsPerDay: true,
       user: { select: { id: true, name: true, email: true } },
-      center: { select: { id: true, name: true, location: true } },
       assignments: {
         where: { schedule: { isFinal: true } },
-        select: assignmentSelect,
+        select: proctorAssignmentSelect,
       },
     },
   });
@@ -243,12 +265,36 @@ export const getProctorDashboard = async (user) => {
     assignments.map((assignment) => assignment.exam?.courseOffering?.course).filter(Boolean),
     (course) => course.id
   );
-  const relatedStudents = uniqueBy(
-    assignments.flatMap((assignment) => assignment.exam?.courseOffering?.registrations ?? [])
-      .map((registration) => registration.student)
-      .filter(Boolean),
-    (student) => student.id
-  );
+
+  // Fetch related students via a bounded query (max 100) instead of loading
+  // every registration nested inside every assignment (O(assignments × students)).
+  const relatedStudents = await prisma.student.findMany({
+    where: {
+      registrations: {
+        some: {
+          courseOffering: {
+            exams: {
+              some: {
+                assignments: {
+                  some: {
+                    proctorId,
+                    schedule: { isFinal: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    select: {
+      id: true,
+      universityId: true,
+      user: { select: { id: true, name: true, email: true } },
+      program: { select: { id: true, name: true, code: true } },
+    },
+    take: 100,
+  });
   const centers = uniqueBy(assignments.map((assignment) => assignment.room?.center).filter(Boolean), (center) => center.id);
 
   return {
@@ -257,7 +303,6 @@ export const getProctorDashboard = async (user) => {
       department: proctor.department,
       maxExamsPerDay: proctor.maxExamsPerDay,
       user: proctor.user,
-      center: proctor.center,
     },
     summary: {
       assignedDuties: assignments.length,
@@ -287,6 +332,14 @@ export const getPublishedSchedulesForRole = async () => {
   return prisma.schedule.findMany({
     where: { isFinal: true },
     orderBy: { createdAt: 'desc' },
-    select: publishedScheduleSelect,
+    select: {
+      id: true,
+      name: true,
+      examPeriod: true,
+      isFinal: true,
+      createdAt: true,
+      updatedAt: true,
+      assignments: { select: assignmentSelect },
+    },
   });
 };

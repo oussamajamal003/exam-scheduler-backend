@@ -23,7 +23,7 @@ export const optimizeSchema = z.object({
 export const generateScheduleSchema = z.object({
   body: z.object({
     semesterId: z.string().uuid(),
-    scheduleName: z.string().min(3),
+    scheduleName: z.string().trim().min(3),
   }),
 });
 

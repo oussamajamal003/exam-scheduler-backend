@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getSemesterSchema = uuidParamSchema;
 
@@ -9,6 +9,7 @@ export const createSemesterSchema = z.object({
     startDate: z.string().datetime(),
     endDate: z.string().datetime(),
     academicYear: z.string().optional(),
+    isActive: z.boolean().optional(),
   }),
 });
 
@@ -19,13 +20,14 @@ export const updateSemesterSchema = z.object({
     startDate: z.string().datetime().optional(),
     endDate: z.string().datetime().optional(),
     academicYear: z.string().optional(),
+    isActive: z.boolean().optional(),
   }),
 });
 
 export const getSemestersSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
+    academicYear: z.string().optional(),
+    startFrom: z.string().optional(),
+    endTo: z.string().optional(),
   }).catchall(z.any()),
 });

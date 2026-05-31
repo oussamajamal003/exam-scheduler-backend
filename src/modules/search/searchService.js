@@ -2,6 +2,32 @@ import prisma from '../../config/prisma.js';
 import * as roleDashboardService from '../roleDashboards/roleDashboardsService.js';
 import { normalizeRole } from '../../guards/roleGuard.js';
 
+// ---------------------------------------------------------------------------
+// Per-user dashboard response cache.
+// Prevents the expensive getStudentDashboard / getProctorDashboard queries
+// from running on every debounced keystroke in the global search.
+// ---------------------------------------------------------------------------
+const _dashboardCache = new Map();
+const DASHBOARD_CACHE_TTL_MS = 60_000; // 60 seconds
+
+const getCachedDashboard = async (cacheKey, fetchFn) => {
+  const entry = _dashboardCache.get(cacheKey);
+  if (entry && Date.now() < entry.expiresAt) return entry.data;
+
+  const data = await fetchFn();
+  _dashboardCache.set(cacheKey, { data, expiresAt: Date.now() + DASHBOARD_CACHE_TTL_MS });
+
+  // Evict expired entries to prevent unbounded memory growth.
+  if (_dashboardCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of _dashboardCache) {
+      if (now >= v.expiresAt) _dashboardCache.delete(k);
+    }
+  }
+
+  return data;
+};
+
 /**
  * Global search across the scheduling system.
  *
@@ -88,11 +114,11 @@ const formatProctor = (p) => ({
   id: p.id,
   type: 'proctor',
   title: p.user?.name ?? 'Proctor',
-  subtitle: [p.user?.email, p.center?.name, p.department].filter(Boolean).join(' • '),
+  subtitle: [p.user?.email, p.department].filter(Boolean).join(' • '),
   badge: 'Proctor',
   icon: 'user-cog',
   href: '/proctors',
-  metadata: { centerId: p.centerId },
+  metadata: {},
 });
 
 const formatAdmin = (u) => ({
@@ -172,6 +198,14 @@ const includesQuery = (query, ...values) => {
   return values.some((value) => typeof value === 'string' && value.toLowerCase().includes(normalized));
 };
 
+const matchesIntent = (query, ...keywords) => {
+  const normalized = query.toLowerCase();
+  return keywords.some((keyword) => {
+    const candidate = keyword.toLowerCase();
+    return candidate.includes(normalized) || normalized.includes(candidate);
+  });
+};
+
 const limitItems = (items, limit) => items.slice(0, limit);
 
 const uniqueResults = (items, getKey) => {
@@ -246,8 +280,28 @@ const formatRoleSchedule = ({ id, name, examPeriod, assignmentCount, href }) => 
   href,
 });
 
+const formatDashboard = ({ id, type, title, subtitle, href }) => ({
+  id,
+  type,
+  title,
+  subtitle,
+  badge: 'Dashboard',
+  icon: 'shield',
+  href,
+  metadata: { target: 'dashboard' },
+});
+
 const buildStudentSearch = async ({ user, query, perGroup }) => {
-  const dashboard = await roleDashboardService.getStudentDashboard(user);
+  const dashboard = await getCachedDashboard(`student:${user.id}`, () => roleDashboardService.getStudentDashboard(user));
+  const dashboardResults = matchesIntent(query, 'student dashboard', 'dashboard', 'home')
+    ? [formatDashboard({
+        id: 'student-dashboard',
+        type: 'student-dashboard',
+        title: 'Student Dashboard',
+        subtitle: 'Overview of your courses, exams, and published schedule',
+        href: '/student/dashboard',
+      })]
+    : [];
   const courseResults = limitItems(
     dashboard.courses
       .filter((courseOffering) => includesQuery(
@@ -352,13 +406,22 @@ const buildStudentSearch = async ({ user, query, perGroup }) => {
 
   return [
     { key: 'academic', label: 'Academic', items: [...courseResults, ...examResults] },
-    { key: 'scheduling', label: 'Scheduling', items: scheduleResults },
+    { key: 'scheduling', label: 'Scheduling', items: [...dashboardResults, ...scheduleResults] },
     { key: 'resources', label: 'Resources', items: [...roomResults, ...centerResults] },
   ].filter((group) => group.items.length > 0);
 };
 
 const buildProctorSearch = async ({ user, query, perGroup }) => {
-  const dashboard = await roleDashboardService.getProctorDashboard(user);
+  const dashboard = await getCachedDashboard(`proctor:${user.id}`, () => roleDashboardService.getProctorDashboard(user));
+  const dashboardResults = matchesIntent(query, 'proctor dashboard', 'dashboard', 'home')
+    ? [formatDashboard({
+        id: 'proctor-dashboard',
+        type: 'proctor-dashboard',
+        title: 'Proctor Dashboard',
+        subtitle: 'Overview of duties, schedules, and assigned students',
+        href: '/proctor/dashboard',
+      })]
+    : [];
   const courseResults = limitItems(
     uniqueResults(
       dashboard.assignments
@@ -458,7 +521,7 @@ const buildProctorSearch = async ({ user, query, perGroup }) => {
   return [
     { key: 'academic', label: 'Academic', items: [...courseResults, ...dutyResults] },
     { key: 'users', label: 'Users', items: studentResults },
-    { key: 'scheduling', label: 'Scheduling', items: scheduleResults },
+    { key: 'scheduling', label: 'Scheduling', items: [...dashboardResults, ...scheduleResults] },
     { key: 'resources', label: 'Resources', items: [...roomResults, ...centerResults] },
   ].filter((group) => group.items.length > 0);
 };
@@ -561,13 +624,11 @@ export const globalSearch = async ({ q, limit, user }) => {
         OR: [
           { department: contains },
           { user: { is: { OR: [{ name: contains }, { email: contains }] } } },
-          { center: { is: { name: contains } } },
         ],
       },
       take: perGroup,
       include: {
         user: { select: { id: true, name: true, email: true } },
-        center: { select: { id: true, name: true } },
       },
     }),
     prisma.user.findMany({
@@ -632,6 +693,15 @@ export const globalSearch = async ({ q, limit, user }) => {
       ...admins.map(formatAdmin),
     ]},
     { key: 'scheduling', label: 'Scheduling', items: [
+      ...(matchesIntent(query, 'admin dashboard', 'dashboard', 'home')
+        ? [formatDashboard({
+            id: 'admin-dashboard',
+            type: 'admin-dashboard',
+            title: 'Admin Dashboard',
+            subtitle: 'Overview of schedules, resources, and optimization analytics',
+            href: '/dashboard',
+          })]
+        : []),
       ...schedules.map(formatSchedule),
     ]},
     { key: 'resources', label: 'Resources', items: [

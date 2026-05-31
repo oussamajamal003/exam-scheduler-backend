@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getCenterSchema = uuidParamSchema;
 
@@ -27,9 +27,7 @@ export const updateCenterSchema = z.object({
 });
 
 export const getCentersSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
+    isActive: z.enum(['true', 'false']).optional(),
   }).catchall(z.any()),
 });

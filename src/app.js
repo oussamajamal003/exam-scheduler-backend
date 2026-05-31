@@ -1,5 +1,6 @@
 ﻿import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import swaggerUi from 'swagger-ui-express';
 import YAML from 'yamljs';
 import { fileURLToPath } from 'url';
@@ -19,6 +20,7 @@ const swaggerDocument = YAML.load(
 const app = express();
 
 // Middlewares
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -42,7 +44,6 @@ import centerRoutes from './modules/centers/centersRoutes.js';
 import examRoutes from './modules/exams/examsRoutes.js';
 import timeSlotRoutes from './modules/timeslots/timeslotsRoutes.js';
 import enrollmentRoutes from './modules/enrollments/enrollmentsRoutes.js';
-import aiRoutes from './modules/ai/aiRoutes.js';
 import demoDataRoutes from './modules/demoData/demoDataRoutes.js';
 import searchRoutes from './modules/search/searchRoutes.js';
 import roleDashboardRoutes from './modules/roleDashboards/roleDashboardsRoutes.js';
@@ -68,7 +69,6 @@ app.use('/api/centers', centerRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/timeslots', timeSlotRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
-app.use('/api/ai', aiRoutes);
 app.use('/api/demo-data', demoDataRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/role-dashboards', roleDashboardRoutes);

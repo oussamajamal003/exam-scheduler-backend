@@ -6,9 +6,7 @@ datasource db {
   provider = "postgresql"
 }
 
-// -----------------------------------
-// ENUMS
-// -----------------------------------
+
 enum Role {
   ADMIN
   PROCTOR
@@ -39,7 +37,6 @@ enum CourseType {
   PROJECT
 }
 
-
 enum SchedulingAlgorithmType {
   HYBRID_CONSTRAINT_BASED
 }
@@ -56,95 +53,82 @@ enum ScheduleGenerationStage {
   BLOCKED
 }
 
-// -----------------------------------
-// USER SYSTEM
-// -----------------------------------
 model User {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  password  String
-  role      Role     @default(STUDENT)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  student    Student?
-  proctor    Proctor?
+  id            String         @id @default(uuid())
+  name          String
+  email         String         @unique
+  password      String
+  role          Role           @default(STUDENT)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
   notifications Notification[]
-  settings UserSettings?
+  proctor       Proctor?
+  student       Student?
+  settings      UserSettings?
 
   @@map("users")
 }
 
 model UserSettings {
-  id String @id @default(uuid())
-  userId String @unique
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  schedulePublishedNotifications Boolean @default(true)
-  examAssignmentUpdates Boolean @default(true)
-  roomTimeChanges Boolean @default(true)
-  announcementsMessages Boolean @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                             String   @id @default(uuid())
+  userId                         String   @unique
+  schedulePublishedNotifications Boolean  @default(true)
+  examAssignmentUpdates          Boolean  @default(true)
+  roomTimeChanges                Boolean  @default(true)
+  announcementsMessages          Boolean  @default(true)
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
+  user                           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_settings")
 }
 
 model Student {
-  id           String   @id @default(uuid())
-  userId       String   @unique
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  programId    String?
-  program      Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
-  universityId String   @unique
-
-
+  id            String                @id @default(uuid())
+  userId        String                @unique
+  programId     String?
+  universityId  String                @unique
+  createdBy     String?
+  updatedBy     String?
   registrations Registration[]
   notifications StudentNotification[]
-  
+  program       Program?              @relation(fields: [programId], references: [id])
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([programId])
   @@map("students")
-  createdBy   String?
-  updatedBy   String?
 }
 
 model Proctor {
-  id             String  @id @default(uuid())
-  userId         String  @unique
-  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  centerId       String
-  center         Center  @relation(fields: [centerId], references: [id], onDelete: Restrict)
-  department     String?
-  maxExamsPerDay Int?    @default(2)
-
-  assignments         ExamAssignment[]
-  availableTimeSlots  ProctorAvailability[]
+  id                 String                @id @default(uuid())
+  userId             String                @unique
+  department         String?
+  maxExamsPerDay     Int?                  @default(2)
+  createdBy          String?
+  updatedBy          String?
+  assignments        ExamAssignment[]
+  availableTimeSlots ProctorAvailability[]
+  user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("proctors")
-  createdBy   String?
-  updatedBy   String?
 }
 
-// -----------------------------------
-// MINI SIS (ACADEMIC DATA)
-// -----------------------------------
 model Program {
-  id   String @id @default(uuid())
-  name String
-  code String @unique
+  id           String      @id @default(uuid())
+  name         String
+  code         String      @unique
+  createdBy    String?
+  updatedBy    String?
+  createdAt    DateTime    @default(now())
+  departmentId String?
   description  String?
   isActive     Boolean     @default(true)
-  departmentId String?
-  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
-  
-  students Student[]
-  courses  Course[]
+  courses      Course[]
+  department   Department? @relation(fields: [departmentId], references: [id])
+  students     Student[]
 
   @@map("programs")
-  createdBy   String?
-  updatedBy   String?
 }
 
 model Department {
@@ -152,24 +136,22 @@ model Department {
   name      String
   code      String    @unique
   createdAt DateTime  @default(now())
-
   programs  Program[]
 
   @@map("departments")
 }
 
-
 model Semester {
-  id           String   @id @default(uuid())
-  name         String   // e.g., "Fall 2026"
-  startDate    DateTime
-  endDate      DateTime
-  academicYear String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  createdBy    String?
-  updatedBy    String?
-
+  id              String           @id @default(uuid())
+  name            String
+  startDate       DateTime
+  endDate         DateTime
+  isActive        Boolean          @default(false)
+  createdBy       String?
+  updatedBy       String?
+  academicYear    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   courseOfferings CourseOffering[]
   courses         Course[]
 
@@ -177,56 +159,54 @@ model Semester {
 }
 
 model Course {
-  id        String   @id @default(uuid())
-  code      String
-  title     String
-  programId String?
-  program   Program? @relation(fields: [programId], references: [id], onDelete: SetNull)
-  semesterId String?
-  semester   Semester? @relation(fields: [semesterId], references: [id], onDelete: SetNull)
-  credits      Int?
-  description  String?
-  isActive     Boolean        @default(true)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-
+  id              String           @id @default(uuid())
+  code            String           @unique
+  title           String           @unique
+  programId       String?
+  createdBy       String?
+  updatedBy       String?
+  createdAt       DateTime         @default(now())
+  credits         Int?
+  description     String?
+  isActive        Boolean          @default(true)
+  updatedAt       DateTime         @updatedAt
+  semesterId      String?
   courseOfferings CourseOffering[]
-  
-  @@unique([code, semesterId])
+  program         Program?         @relation(fields: [programId], references: [id])
+  semester        Semester?        @relation(fields: [semesterId], references: [id])
+
   @@index([programId])
   @@index([semesterId])
   @@map("courses")
-  createdBy   String?
-  updatedBy   String?
 }
 
 model CourseOffering {
   id               String         @id @default(uuid())
   courseId         String
-  course           Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
   semesterId       String
-  semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
   section          String?
-  instructor   String?
   expectedStudents Int            @default(0)
   capacity         Int?
-  day          String?
-  time         String?
-  roomLabel    String?
-  notes        String?
-  priority   Int?   // higher = schedule earlier
-  difficulty Int?   // harder exam (needs spacing)
-  courseType       CourseType      @default(COURSE)
-  hasExam          Boolean         @default(true)
+  credits          Int?
   status           OfferingStatus @default(ACTIVE)
   createdBy        String?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  createdAt        DateTime       @default(now())
+  day              String?
+  instructor       String?
+  notes            String?
+  roomLabel        String?
+  time             String?
+  updatedAt        DateTime       @updatedAt
+  difficulty       Int?
+  priority         Int?
+  courseType       CourseType     @default(COURSE)
+  hasExam          Boolean        @default(true)
+  endTime          String?
+  course           Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  semester         Semester       @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+  exams            Exam[]
+  registrations    Registration[]
 
-  registrations Registration[]
-  exams         Exam[]
-
-  // A specific course section should only occur once per semester
   @@unique([courseId, semesterId, section])
   @@index([courseId])
   @@index([semesterId])
@@ -236,78 +216,66 @@ model CourseOffering {
 model Registration {
   id               String         @id @default(uuid())
   studentId        String
-  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade)
   courseOfferingId String
+  createdAt        DateTime       @default(now())
+  status           String?        @default("ACTIVE")
+  updatedAt        DateTime       @updatedAt
   courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
-  status       String?        @default("ACTIVE")
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  student          Student        @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
-
-  // Prevent duplicate enrollment for the exact same offering
   @@unique([studentId, courseOfferingId])
   @@index([studentId])
   @@index([courseOfferingId])
   @@map("registrations")
 }
 
-// -----------------------------------
-// RESOURCES
-// -----------------------------------
 model Center {
-  id       String  @id @default(uuid())
-  name     String  @unique
-  location String?
-  code         String?        @unique
-  description  String?
-  isActive     Boolean        @default(true)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-
-
-  rooms        Room[]
-  proctors     Proctor[]
-  supervisors  String[] @default([])
-
-  @@map("centers")
+  id          String   @id @default(uuid())
+  name        String   @unique
+  location    String?
   createdBy   String?
   updatedBy   String?
+  code        String?  @unique
+  createdAt   DateTime @default(now())
+  description String?
+  isActive    Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  supervisors String[] @default([])
+  rooms       Room[]
+
+  @@map("centers")
 }
 
 model Room {
-  id       String     @id @default(uuid())
-  centerId String
-  center   Center     @relation(fields: [centerId], references: [id], onDelete: Cascade)
-  name     String
-  capacity Int
-  status   RoomStatus @default(AVAILABLE)
-
-  assignments ExamAssignment[]
-
-  // Room names must be unique within a center
-  @@unique([centerId, name])
-  @@map("rooms")
+  id          String           @id @default(uuid())
+  centerId    String
+  name        String           @unique
+  capacity    Int
+  status      RoomStatus       @default(AVAILABLE)
   createdBy   String?
   updatedBy   String?
+  assignments ExamAssignment[]
+  center      Center           @relation(fields: [centerId], references: [id], onDelete: Cascade)
+
+  @@map("rooms")
 }
 
 model TimeSlot {
-  id        String   @id @default(uuid())
-  startTime DateTime
-  endTime   DateTime
-  date         DateTime?
-  duration     Int?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-
-  assignments         ExamAssignment[]
-  availableProctors   ProctorAvailability[]
+  id                String                @id @default(uuid())
+  startTime         DateTime
+  endTime           DateTime
+  createdBy         String?
+  updatedBy         String?
+  createdAt         DateTime              @default(now())
+  date              DateTime?
+  duration          Int?
+  updatedAt         DateTime              @updatedAt
+  assignments       ExamAssignment[]
+  availableProctors ProctorAvailability[]
 
   @@unique([startTime, endTime])
   @@index([date])
   @@map("time_slots")
-  createdBy   String?
-  updatedBy   String?
 }
 
 model ProctorAvailability {
@@ -321,53 +289,48 @@ model ProctorAvailability {
   @@map("proctor_availabilities")
 }
 
-// -----------------------------------
-// EXAMS
-// -----------------------------------
 model Exam {
-  id               String         @id @default(uuid())
+  id               String           @id @default(uuid())
   courseOfferingId String
-  courseOffering   CourseOffering @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
-  status           ExamStatus     @default(DRAFT)
-  duration         Int? // Duration in minutes
+  status           ExamStatus       @default(DRAFT)
+  duration         Int?
   createdBy        String?
-
-  assignments ExamAssignment[]
+  assignments      ExamAssignment[]
+  courseOffering   CourseOffering   @relation(fields: [courseOfferingId], references: [id], onDelete: Cascade)
 
   @@index([courseOfferingId])
   @@map("exams")
 }
 
-// -----------------------------------
-// SCHEDULING CORE
-// -----------------------------------
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
 model Schedule {
-  id        String   @id @default(uuid())
-  name      String
-  examPeriod String?
-  isFinal   Boolean  @default(false)
-  createdBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  algorithmType       SchedulingAlgorithmType @default(HYBRID_CONSTRAINT_BASED)
-  generationStage     ScheduleGenerationStage @default(GENERATED)
-  qualityScore        Float?
-  hardConstraintScore Int                     @default(0)
-  softConstraintScore Int                     @default(0)
-  algorithmMetadata   Json?
-
-  assignments ExamAssignment[]
+  id                   String                  @id @default(uuid())
+  name                 String
+  isFinal              Boolean                 @default(false)
+  createdBy            String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  algorithmMetadata    Json?
+  algorithmType        SchedulingAlgorithmType @default(HYBRID_CONSTRAINT_BASED)
+  generationStage      ScheduleGenerationStage @default(GENERATED)
+  hardConstraintScore  Int                     @default(0)
+  qualityScore         Float?
+  softConstraintScore  Int                     @default(0)
+  examPeriod           String?
+  publishedVersion     Int                     @default(0)
+  lastPublishedAt      DateTime?
+  assignments          ExamAssignment[]
   studentNotifications StudentNotification[]
 
+  @@index([isFinal])
+  @@index([isFinal, createdAt])
   @@map("schedules")
 }
 
 model StudentNotification {
   id         String    @id
   studentId  String
-  student    Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
   scheduleId String?
-  schedule   Schedule? @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
   type       String
   title      String
   message    String
@@ -375,6 +338,8 @@ model StudentNotification {
   readAt     DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
+  schedule   Schedule? @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  student    Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, scheduleId, type])
   @@index([studentId, createdAt])
@@ -383,39 +348,43 @@ model StudentNotification {
 }
 
 model Notification {
-  id        String   @id
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type      String
-  title     String
-  message   String
-  metadata  Json?
-  readAt    DateTime?
-  createdAt DateTime @default(now())
+  id              String          @id
+  userId          String
+  type            String
+  title           String
+  message         String
+  metadata        Json?
+  readAt          DateTime?
+  createdAt       DateTime        @default(now())
+  scheduleId      String?
+  scheduleVersion Int?
+  assignmentId    String?
+  assignment      ExamAssignment? @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([userId, type, scheduleId, scheduleVersion])
+  @@unique([userId, type, scheduleId, assignmentId])
   @@index([userId, createdAt])
   @@index([userId, readAt])
+  @@index([scheduleId])
+  @@index([assignmentId])
   @@map("notifications")
 }
 
 model ExamAssignment {
-  id         String   @id @default(uuid())
-  scheduleId String
-  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  id            String         @id @default(uuid())
+  scheduleId    String
+  examId        String
+  roomId        String
+  proctorId     String
+  timeSlotId    String
+  exam          Exam           @relation(fields: [examId], references: [id], onDelete: Cascade)
+  proctor       Proctor        @relation(fields: [proctorId], references: [id])
+  room          Room           @relation(fields: [roomId], references: [id])
+  schedule      Schedule       @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  timeSlot      TimeSlot       @relation(fields: [timeSlotId], references: [id])
+  notifications Notification[]
 
-  examId String
-  exam   Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
-
-  roomId String
-  room   Room   @relation(fields: [roomId], references: [id], onDelete: Restrict)
-
-  proctorId String
-  proctor   Proctor @relation(fields: [proctorId], references: [id], onDelete: Restrict)
-
-  timeSlotId String
-  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
-
-  // Prevents algorithm from generating duplicate identical assignments for the same schedule
   @@unique([scheduleId, examId, roomId, proctorId, timeSlotId])
   @@index([scheduleId])
   @@index([examId])
@@ -426,15 +395,17 @@ model ExamAssignment {
 }
 
 model AuditLog {
-  id          String   @id @default(uuid())
-  userId      String?
-  action      String
-  entity      String
-  entityId    String
-  oldData     Json?
-  newData     Json?
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String
+  oldData   Json?
+  newData   Json?
+  createdAt DateTime @default(now())
 }
+
+
 
 
 
@@ -443,4 +414,5 @@ model AuditLog {
 // Scheduling → (Exams, TimeSlots, Rooms, Proctors)
 //         ↓
 // Execution → (Schedule, Assignments)
+
 

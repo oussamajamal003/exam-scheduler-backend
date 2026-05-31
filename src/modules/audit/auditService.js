@@ -11,7 +11,6 @@ const modelsWithCreatedBy = new Set([
   'Room',
   'TimeSlot',
   'Exam',
-  'ExamAssignment',
 ]);
 
 const modelsWithUpdatedBy = new Set([
@@ -38,7 +37,7 @@ export const applyAuditExtension = (prismaClient) => {
         async create({ model, operation, args, query }) {
           const userId = getAuditUserId();
           if (userId && args.data && model !== 'AuditLog' && modelsWithCreatedBy.has(model)) {
-            args.data.createdBy = userId;
+            args.data.createdBy ??= userId;
           }
           
           const result = await query(args);
@@ -67,7 +66,7 @@ export const applyAuditExtension = (prismaClient) => {
              const modelAccessor = getPrismaModelAccessor(model);
              oldData = await prismaClient[modelAccessor].findUnique({ where: { id } });
              if (userId && args.data && modelsWithUpdatedBy.has(model)) {
-               args.data.updatedBy = userId;
+               args.data.updatedBy ??= userId;
              }
           }
 

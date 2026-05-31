@@ -7,6 +7,13 @@ import {
   buildAvailabilityWrite,
   proctorAvailabilityInclude,
 } from './proctorAvailability.js';
+import { parseListQuery, buildOrderBy, buildMeta } from '../../utils/queryParser.js';
+import {
+  assertNoScheduleAssignmentsForDependency,
+  findImpactedScheduleIds,
+  removeAssignmentsForDependencyDelete,
+  synchronizeSchedules,
+} from '../schedules/scheduleSyncService.js';
 
 const isProctorEmail = (email) => {
   if (!email) return false;
@@ -28,7 +35,6 @@ const assertProctorAccess = (id, user) => {
 
 const proctorInclude = {
   user: { select: { id: true, name: true, email: true, role: true } },
-  center: true,
   ...proctorAvailabilityInclude,
   assignments: {
     include: {
@@ -40,34 +46,39 @@ const proctorInclude = {
   },
 };
 
+const PROCTOR_SORT_FIELDS = {
+  name:      (dir) => ({ user: { name: dir } }),
+  email:     (dir) => ({ user: { email: dir } }),
+  department:(dir) => ({ department: dir }),
+  createdAt: (dir) => ({ user: { createdAt: dir } }),
+};
+
 export const getAll = async (query = {}) => {
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip, sortField, sortDirection, search } = parseListQuery(query);
 
   const where = {};
-  if (query.centerId) where.centerId = query.centerId;
   if (query.userId) where.userId = query.userId;
-  if (query.search) {
+  if (query.department) {
+    where.department = { contains: query.department, mode: 'insensitive' };
+  }
+
+  if (search) {
     where.user = {
       OR: [
-        { name: { contains: query.search, mode: 'insensitive' } },
-        { email: { contains: query.search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
       ],
     };
   }
 
+  const orderBy = buildOrderBy(sortField, sortDirection, PROCTOR_SORT_FIELDS, { user: { name: 'asc' } });
+
   const [data, total] = await Promise.all([
-    prisma.proctor.findMany({
-      where,
-      skip,
-      take: limit,
-      include: proctorInclude,
-    }),
-    prisma.proctor.count({ where })
+    prisma.proctor.findMany({ where, skip, take: limit, orderBy, include: proctorInclude }),
+    prisma.proctor.count({ where }),
   ]);
-  
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+
+  return { data, meta: buildMeta(total, page, limit) };
 };
 
 export const getById = async (id, user) => {
@@ -82,7 +93,7 @@ export const getById = async (id, user) => {
 };
 
 export const create = async (data) => {
-  let { userId, centerId, name, email, center, timeSlotIds, ...rest } = data;
+  let { userId, name, email, timeSlotIds, ...rest } = data;
 
   if (userId) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -95,27 +106,18 @@ export const create = async (data) => {
   
   if (!userId && (name && email)) {
     assertProctorEmail(email);
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) throw new AppError('User with this email already exists', 409);
     const hashedPassword = await bcrypt.hash(`${email.split('@')[0]}@Temp123`, 10);
 
-    const user = await prisma.user.upsert({
-      where: { email },
-      update: { name, password: hashedPassword, role: 'PROCTOR' },
-      create: { name, email, password: hashedPassword, role: 'PROCTOR' }
+    const user = await prisma.user.create({
+      data: { name, email, password: hashedPassword, role: 'PROCTOR' }
     });
     userId = user.id;
   }
   
-  if (!centerId && center) {
-    const centerRecord = await prisma.center.upsert({
-      where: { name: center },
-      update: {},
-      create: { name: center }
-    });
-    centerId = centerRecord.id;
-  }
-  
-  if (!userId || !centerId) {
-    throw new AppError('Unable to resolve user or center for proctor', 400);
+  if (!userId) {
+    throw new AppError('Unable to resolve user for proctor', 400);
   }
 
   const availableTimeSlotIds = await assertTimeSlotsExist(timeSlotIds);
@@ -124,7 +126,6 @@ export const create = async (data) => {
     data: {
       ...rest,
       userId,
-      centerId,
       availableTimeSlots: buildAvailabilityWrite(availableTimeSlotIds),
     },
     include: proctorInclude,
@@ -132,48 +133,55 @@ export const create = async (data) => {
 };
 
 export const update = async (id, data) => {
-  let { userId, centerId, name, email, center, timeSlotIds, ...rest } = data;
+  let { userId, name, email, timeSlotIds, ...rest } = data;
   const updatePayload = { ...rest };
   
   const existing = await prisma.proctor.findUnique({ where: { id }, select: { userId: true } });
   if (!existing) throw new AppError('Proctor not found', 404);
-  
-  if (name || email) {
-    if (email) assertProctorEmail(email);
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'proctor', ids: [id] }, tx);
 
-    await prisma.user.update({
-      where: { id: existing.userId },
-      data: { ...(name && { name }), ...(email && { email }) }
-    });
-  }
+    if (name || email) {
+      if (email) assertProctorEmail(email);
+      if (email) {
+        const duplicateUser = await tx.user.findUnique({ where: { email } });
+        if (duplicateUser && duplicateUser.id !== existing.userId) {
+          throw new AppError('User with this email already exists', 409);
+        }
+      }
 
-  if (center) {
-    const centerRecord = await prisma.center.upsert({
-      where: { name: center },
-      update: {},
-      create: { name: center }
-    });
-    updatePayload.centerId = centerRecord.id;
-  } else if (centerId) {
-    updatePayload.centerId = centerId;
-  }
+      await tx.user.update({
+        where: { id: existing.userId },
+        data: { ...(name && { name }), ...(email && { email }) }
+      });
+    }
 
-  if (timeSlotIds !== undefined) {
-    const availableTimeSlotIds = await assertTimeSlotsExist(timeSlotIds);
-    updatePayload.availableTimeSlots = buildAvailabilityWrite(availableTimeSlotIds, {
-      replaceExisting: true,
+    if (timeSlotIds !== undefined) {
+      const availableTimeSlotIds = await assertTimeSlotsExist(timeSlotIds);
+      updatePayload.availableTimeSlots = buildAvailabilityWrite(availableTimeSlotIds, {
+        replaceExisting: true,
+      });
+    }
+
+    const proctor = await tx.proctor.update({
+      where: { id },
+      data: updatePayload,
+      include: proctorInclude,
     });
-  }
-  
-  return await prisma.proctor.update({
-    where: { id },
-    data: updatePayload,
-    include: proctorInclude,
+    await synchronizeSchedules(scheduleIds, tx);
+    return proctor;
   });
 };
 
 export const remove = async (id) => {
-  return await prisma.proctor.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'proctor', ids: [id] }, tx);
+    await assertNoScheduleAssignmentsForDependency({ dependency: 'proctor', ids: [id], entityLabel: 'Proctor' }, tx);
+    await removeAssignmentsForDependencyDelete({ dependency: 'proctor', ids: [id] }, tx);
+    const deleted = await tx.proctor.delete({ where: { id } });
+    await synchronizeSchedules(scheduleIds, tx);
+    return deleted;
+  });
 };
 
 export const getWorkload = async (id, user) => {

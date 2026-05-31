@@ -1,5 +1,7 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import { parseListQuery, buildOrderBy, buildMeta } from '../../utils/queryParser.js';
+import { assertNoScheduleAssignmentsForDependency, findImpactedScheduleIds, synchronizeSchedules } from '../schedules/scheduleSyncService.js';
 
 const buildSearchFilter = (search) => ({
   OR: [
@@ -28,28 +30,26 @@ const normalizeDepartment = (department) => {
   };
 };
 
+const DEPT_SORT_FIELDS = {
+  name:      (dir) => ({ name: dir }),
+  code:      (dir) => ({ code: dir }),
+  createdAt: (dir) => ({ createdAt: dir }),
+};
+
 export const getAll = async (query = {}) => {
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip, sortField, sortDirection, search } = parseListQuery(query);
 
   const where = {};
-  if (query.search) {
-    Object.assign(where, buildSearchFilter(query.search));
-  }
+  if (search) Object.assign(where, buildSearchFilter(search));
+
+  const orderBy = buildOrderBy(sortField, sortDirection, DEPT_SORT_FIELDS, [{ name: 'asc' }]);
 
   const [data, total] = await Promise.all([
-    prisma.department.findMany({
-      where,
-      skip,
-      take: limit,
-      orderBy: { name: 'asc' },
-      include: departmentInclude,
-    }),
+    prisma.department.findMany({ where, skip, take: limit, orderBy, include: departmentInclude }),
     prisma.department.count({ where }),
   ]);
 
-  return { data: data.map(normalizeDepartment), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeDepartment), meta: buildMeta(total, page, limit) };
 };
 
 export const getById = async (id) => {
@@ -71,14 +71,24 @@ export const create = async (data) => {
 };
 
 export const update = async (id, data) => {
-  const department = await prisma.department.update({
-    where: { id },
-    data,
-    include: departmentInclude,
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'department', ids: [id] }, tx);
+    const department = await tx.department.update({
+      where: { id },
+      data,
+      include: departmentInclude,
+    });
+    await synchronizeSchedules(scheduleIds, tx);
+    return normalizeDepartment(department);
   });
-  return normalizeDepartment(department);
 };
 
 export const remove = async (id) => {
-  return await prisma.department.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'department', ids: [id] }, tx);
+    await assertNoScheduleAssignmentsForDependency({ dependency: 'department', ids: [id], entityLabel: 'Department' }, tx);
+    const deleted = await tx.department.delete({ where: { id } });
+    await synchronizeSchedules(scheduleIds, tx);
+    return deleted;
+  });
 };

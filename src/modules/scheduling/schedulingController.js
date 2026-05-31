@@ -29,5 +29,9 @@ export const getScheduleAnalysis = catchAsync(async (req, res) => {
 
 export const publishSchedule = catchAsync(async (req, res) => {
   const result = await schedulingService.publishSchedule(req.params.id, req.body);
-  sendResponse(res, 200, result.message, result.schedule);
+  sendResponse(res, 200, result.message, {
+    schedule: result.schedule,
+    eventType: result.eventType ?? null,
+    scheduleVersion: result.scheduleVersion ?? null,
+  });
 });

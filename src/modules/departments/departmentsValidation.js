@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getDepartmentSchema = uuidParamSchema;
 
@@ -19,9 +19,5 @@ export const updateDepartmentSchema = z.object({
 });
 
 export const getDepartmentsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
-  }).catchall(z.any()),
+  query: listQueryBase.extend({}).catchall(z.any()),
 });

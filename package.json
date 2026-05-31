@@ -1,7 +1,7 @@
 {
   "name": "exam-scheduler-backend",
   "version": "1.0.0",
-  "description": "AI Multi-Center Exam Scheduling System Backend",
+  "description": "Multi-Center Exam Scheduling System Backend",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
     "@prisma/client": "^7.6.0",
     "@types/pg": "^8.20.0",
     "bcrypt": "^6.0.0",
+    "compression": "^1.8.1",
     "connect-livereload": "^0.6.1",
     "cors": "^2.8.6",
     "express": "^4.22.1",

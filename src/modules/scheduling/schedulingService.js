@@ -1,21 +1,42 @@
-﻿import prisma from '../../config/prisma.js';
+﻿import { Prisma } from '@prisma/client';
+import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 import {
   createSchedulePublicationNotifications,
   NOTIFICATION_TYPES,
 } from '../notifications/notificationsService.js';
 import { extractAvailableTimeSlotIds } from '../proctors/proctorAvailability.js';
+import {
+  assertScheduleNameAvailable,
+  remapScheduleNameConflict,
+} from '../schedules/scheduleNameService.js';
 
 const DEFAULT_EXAM_DURATION = 120;
 const PROCTOR_RATIO = 20; // 1 proctor per 20 students
 const MAX_STUDENT_EXAMS_PER_DAY = 2;
-const LOCAL_SEARCH_EXAM_LIMIT = 30;
 const LOCAL_SEARCH_CANDIDATE_LIMIT = 6;
+const LOCAL_SEARCH_MAX_PASSES = 4;
+const LOCAL_SEARCH_SWAP_EXAM_POOL = 12;
+const LOCAL_SEARCH_SWAP_CANDIDATES = 2;
+const ADAPTIVE_ESCALATION_TARGET_GAIN = 5;
+const METRIC_REPAIR_EXAM_LIMIT = 10;
+const METRIC_REPAIR_CANDIDATE_LIMIT = 8;
+const CHAIN_SEARCH_EXAM_LIMIT = 8;
+const CHAIN_SEARCH_CANDIDATE_LIMIT = 5;
+const THREE_EXAM_SWAP_POOL = 6;
+const MIN_MEANINGFUL_MOVE_GAIN = 0.35;
+const MAX_NON_GREEDY_SCORE_DROP = 0.8;
+const PROCTOR_REBALANCE_MAX_REASSIGNMENTS = 120;
+const PROCTOR_REBALANCE_CANDIDATE_LIMIT = 32;
+const PROCTOR_REBALANCE_OVERLOADED_SCAN_LIMIT = 12;
+const MAX_CANDIDATE_ROOM_SETS = 4;
+const SKIP_LOCAL_SEARCH_SCORE_THRESHOLD = 96;
 const CANDIDATE_PENALTY_WEIGHTS = {
-  unusedRoomSeats: 0.30,
-  proctorWorkload: 0.25,
-  studentDailyLoad: 0.25,
-  roomCenterSpread: 0.20,
+  unusedRoomSeats: 0.25,
+  roomCount: 0.20,
+  proctorWorkload: 0.20,
+  studentDailyLoad: 0.20,
+  roomCenterSpread: 0.15,
 };
 const EXAM_PRIORITY_BAND = {
   CRITICAL: 'CRITICAL',
@@ -58,6 +79,27 @@ const PIPELINE_STAGES = [
   GENERATION_STAGE.CONFIRMED,
   GENERATION_STAGE.GENERATED,
 ];
+
+// ─── Per-semester in-memory caches ───────────────────────────────────────────
+// Both caches have a short TTL (minutes) that covers the typical workflow:
+//   optimizeScheduling (Build Draft) → user reviews results → generateSchedule
+// They are keyed by semesterId and cleared on use or expiry.
+
+const NORMALIZED_DATA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OPTIMIZATION_CACHE_TTL_MS = 12 * 60 * 1000;   // 12 minutes
+
+const _normalizedDataCache = new Map(); // semesterId → { data, expiresAt }
+const _optimizationCache = new Map();  // semesterId → { data, expiresAt }
+
+const _cacheGet = (cache, key) => {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { cache.delete(key); return null; }
+  return entry.data;
+};
+const _cacheSet = (cache, key, data, ttl) => cache.set(key, { data, expiresAt: Date.now() + ttl });
+const _cacheDel = (cache, key) => cache.delete(key);
+
 const getRequiredProctorCount = (studentCount) => {
   if (studentCount <= 0) return 1;
   return Math.ceil(studentCount / PROCTOR_RATIO);
@@ -131,7 +173,7 @@ const buildExamConflictCountMap = (studentToExams) => {
   );
 };
 
-const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAssignments }) => {
+const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAssignments, totalAvailableRoomCapacity = null }) => {
   const proctorAvailabilityMap = new Map();
   const studentDailyLoadMap = new Map();
   const roomSlotMap = new Map();
@@ -142,13 +184,17 @@ const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAss
   const timeslotCapacityMap = new Map();
   const proctorSlotMap = new Map();
   const proctorDailyLoadMap = new Map();
+  const proctorGlobalLoadMap = new Map();
   const roomTimeRangeMap = new Map();
   const proctorTimeRangeMap = new Map();
   const slotDayKeyMap = new Map(timeSlots.map((slot) => [slot.id, toDateKey(slot.date ?? slot.startTime)]));
   const availableRooms = rooms.filter((room) => room.status === 'AVAILABLE');
+  // Compute total available capacity once and reuse for every slot (it never varies).
+  const totalCapacity = totalAvailableRoomCapacity ?? getTotalCapacity(availableRooms);
 
   for (const proctor of proctors) {
     proctorAvailabilityMap.set(proctor.id, new Set(proctor.availableTimeSlotIds ?? []));
+    proctorGlobalLoadMap.set(proctor.id, 0);
   }
 
   for (const room of rooms) {
@@ -159,8 +205,10 @@ const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAss
   }
 
   for (const slot of timeSlots) {
-    timeslotCapacityMap.set(slot.id, getTotalCapacity(availableRooms));
+    timeslotCapacityMap.set(slot.id, totalCapacity);
   }
+
+  const reservedStudentExamSlots = new Set();
 
   for (const assignment of existingAssignments) {
     if (!assignment.schedule?.isFinal) continue;
@@ -170,6 +218,7 @@ const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAss
     addToNestedSet(roomSlotMap, assignment.roomId, assignment.timeSlotId);
     addToNestedSet(roomUsageMap, assignment.timeSlotId, assignment.roomId);
     addToNestedSet(proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
+    proctorGlobalLoadMap.set(assignment.proctorId, (proctorGlobalLoadMap.get(assignment.proctorId) ?? 0) + 1);
 
     if (slotDayKey) {
       const proctorDayKey = `${assignment.proctorId}:${slotDayKey}`;
@@ -181,14 +230,18 @@ const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAss
       addTimeRange(roomTimeRangeMap, assignment.roomId, slot.startTime, slot.endTime);
     }
 
-    for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
-      addToNestedSet(studentTimeMap, studentId, assignment.timeSlotId);
-      if (slot?.startTime && slot?.endTime) {
-        addTimeRange(studentTimeRangeMap, studentId, slot.startTime, slot.endTime);
-      }
-      if (slotDayKey) {
-        const studentDayKey = `${studentId}:${slotDayKey}`;
-        studentDailyLoadMap.set(studentDayKey, (studentDailyLoadMap.get(studentDayKey) ?? 0) + 1);
+    const studentReservationKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    if (!reservedStudentExamSlots.has(studentReservationKey)) {
+      reservedStudentExamSlots.add(studentReservationKey);
+      for (const studentId of getUniqueStudentIdsForExam(assignment.exam)) {
+        addToNestedSet(studentTimeMap, studentId, assignment.timeSlotId);
+        if (slot?.startTime && slot?.endTime) {
+          addTimeRange(studentTimeRangeMap, studentId, slot.startTime, slot.endTime);
+        }
+        if (slotDayKey) {
+          const studentDayKey = `${studentId}:${slotDayKey}`;
+          studentDailyLoadMap.set(studentDayKey, (studentDailyLoadMap.get(studentDayKey) ?? 0) + 1);
+        }
       }
     }
   }
@@ -208,49 +261,49 @@ const buildSchedulingLookups = ({ exams, rooms, proctors, timeSlots, existingAss
     roomUsageMap,
     roomAvailabilityMap,
     timeslotCapacityMap,
+    totalAvailableRoomCapacity: totalCapacity,
     proctorSlotMap,
     proctorDailyLoadMap,
+    proctorGlobalLoadMap,
     roomTimeRangeMap,
     proctorTimeRangeMap,
     slotDayKeyMap,
   };
 };
 
-const getStaticFeasibleTimeSlotCount = ({ exam, rooms, proctors, timeSlots }) => {
+const getStaticFeasibleTimeSlotCount = ({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }) => {
   const requiredProctors = getRequiredProctorsForExam(exam);
+  // Fast-path: if total room capacity can never cover required seats, zero slots fit
+  if (totalRoomCapacity < exam.requiredSeats) return 0;
 
   return timeSlots.filter((slot) => {
     if (!canSlotFitExam(slot, exam)) return false;
-    const slotCapacity = getTotalCapacity(rooms.filter((room) => room.status === 'AVAILABLE'));
-    if (slotCapacity < exam.requiredSeats) return false;
-    const availableProctors = proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id));
-    return availableProctors.length >= requiredProctors;
+    // Use pre-indexed proctor list instead of O(proctors) scan
+    return (proctorsBySlotId.get(slot.id)?.length ?? 0) >= requiredProctors;
   }).length;
 };
 
-const getStaticFeasibleOptionCount = ({ exam, rooms, proctors, timeSlots }) => {
+const getStaticFeasibleOptionCount = ({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }) => {
   const requiredProctors = getRequiredProctorsForExam(exam);
+  // Fast-path: if total room capacity can never cover required seats, zero options exist
+  if (totalRoomCapacity < exam.requiredSeats) return 0;
   let count = 0;
 
   for (const slot of timeSlots) {
     if (!canSlotFitExam(slot, exam)) continue;
-    const availableProctors = proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id));
-    if (availableProctors.length < requiredProctors) continue;
-
-    for (const room of rooms) {
-      if (room.status !== 'AVAILABLE' || room.capacity < exam.requiredSeats) continue;
-      if (availableProctors.some((proctor) => proctor.centerId === room.centerId)) count += 1;
-    }
+    // Use pre-indexed proctor list instead of O(proctors) scan
+    if ((proctorsBySlotId.get(slot.id)?.length ?? 0) < requiredProctors) continue;
+    count += 1;
   }
 
   return count;
 };
 
-const addExamFeasibilityStats = ({ exams, rooms, proctors, timeSlots }) => exams.map((exam) => ({
+const addExamFeasibilityStats = ({ exams, timeSlots, proctorsBySlotId, totalRoomCapacity }) => exams.map((exam) => ({
   ...exam,
   resourceDemand: exam.requiredSeats + (getRequiredProctorsForExam(exam) * PROCTOR_RATIO),
-  feasibleTimeSlotCount: getStaticFeasibleTimeSlotCount({ exam, rooms, proctors, timeSlots }),
-  feasibleOptionCount: getStaticFeasibleOptionCount({ exam, rooms, proctors, timeSlots }),
+  feasibleTimeSlotCount: getStaticFeasibleTimeSlotCount({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }),
+  feasibleOptionCount: getStaticFeasibleOptionCount({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }),
 }));
 
 const percentile = (values, ratio) => {
@@ -462,12 +515,24 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
   }));
   const normalizedProctors = proctors.map((proctor) => ({
     id: proctor.id,
-    centerId: proctor.centerId,
-    center: proctor.center,
     user: proctor.user,
     maxExamsPerDay: proctor.maxExamsPerDay ?? 2,
     availableTimeSlotIds: extractAvailableTimeSlotIds(proctor),
   }));
+
+  // Pre-compute total available room capacity once (same for every slot).
+  const totalAvailableRoomCapacity = getTotalCapacity(normalizedRooms);
+
+  // Build a reverse index: slotId → Proctor[] for O(1) proctor-per-slot lookups.
+  // Avoids the O(proctors) linear scan in every slot × exam iteration.
+  const proctorsBySlotId = new Map();
+  for (const proctor of normalizedProctors) {
+    for (const slotId of proctor.availableTimeSlotIds) {
+      if (!proctorsBySlotId.has(slotId)) proctorsBySlotId.set(slotId, []);
+      proctorsBySlotId.get(slotId).push(proctor);
+    }
+  }
+
   const studentExamMap = buildStudentExamMap(exams);
   const examConflictCountMap = buildExamConflictCountMap(studentExamMap);
   const examsWithConflictCounts = addExamFeasibilityStats({
@@ -475,16 +540,18 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
       ...exam,
       conflictCount: examConflictCountMap.get(exam.id) ?? 0,
     })),
-    rooms: normalizedRooms,
-    proctors: normalizedProctors,
     timeSlots,
+    proctorsBySlotId,
+    totalRoomCapacity: totalAvailableRoomCapacity,
   });
   const prioritizedExams = addExamPriorityBands(examsWithConflictCounts);
+  const draftBlockingAssignments = [];
 
   return {
     exams: prioritizedExams,
     rooms: normalizedRooms,
     proctors: normalizedProctors,
+    proctorsBySlotId,
     timeSlots,
     existingAssignments,
     studentExamMap,
@@ -494,7 +561,8 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
       rooms: normalizedRooms,
       proctors: normalizedProctors,
       timeSlots,
-      existingAssignments,
+      existingAssignments: draftBlockingAssignments,
+      totalAvailableRoomCapacity,
     }),
   };
 };
@@ -528,6 +596,12 @@ const ensureExamRecords = async (courseOfferings) => {
 };
 
 const fetchSchedulingData = async (semesterId, options = {}) => {
+  // Skip cache when ensureExams is requested — that may mutate DB state.
+  if (!options.ensureExams) {
+    const cached = _cacheGet(_normalizedDataCache, semesterId);
+    if (cached) return cached;
+  }
+
   const semester = await prisma.semester.findUnique({ where: { id: semesterId } });
   if (!semester) throw new AppError('Semester not found', 404);
 
@@ -567,7 +641,6 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
     }),
     prisma.proctor.findMany({
       include: {
-        center: true,
         user: { select: { id: true, name: true, email: true } },
         availableTimeSlots: {
           select: {
@@ -575,7 +648,7 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
           },
         },
       },
-      orderBy: [{ center: { name: 'asc' } }, { user: { name: 'asc' } }],
+      orderBy: [{ user: { name: 'asc' } }],
     }),
     prisma.timeSlot.findMany({ orderBy: [{ startTime: 'asc' }, { endTime: 'asc' }] }),
     prisma.examAssignment.findMany({
@@ -610,7 +683,11 @@ const fetchSchedulingData = async (semesterId, options = {}) => {
   const timeSlots = getTimeslotsInSemesterRange(semester, allTimeSlots);
   const normalized = normalizeSchedulingData({ courseOfferings, rooms, proctors, timeSlots, existingAssignments });
 
-  return { semester, normalized, createdExamCount };
+  const result = { semester, normalized, createdExamCount };
+  if (!options.ensureExams) {
+    _cacheSet(_normalizedDataCache, semesterId, result, NORMALIZED_DATA_CACHE_TTL_MS);
+  }
+  return result;
 };
 
 // Returns true when two half-open time ranges [startA, endA) and [startB, endB) share any overlap.
@@ -648,6 +725,7 @@ const createUsageTracker = (existingAssignments = [], lookups = null) => {
       studentTimeRangeMap: cloneRangeMap(lookups.studentTimeRangeMap),
       studentDailyLoadMap: cloneCountMap(lookups.studentDailyLoadMap),
       proctorDailyLoadMap: cloneCountMap(lookups.proctorDailyLoadMap),
+      proctorGlobalLoadMap: cloneCountMap(lookups.proctorGlobalLoadMap),
       proctorTimeRangeMap: cloneRangeMap(lookups.proctorTimeRangeMap),
       roomTimeRangeMap: cloneRangeMap(lookups.roomTimeRangeMap),
     };
@@ -660,6 +738,7 @@ const createUsageTracker = (existingAssignments = [], lookups = null) => {
     studentTimeRangeMap: new Map(),
     studentDailyLoadMap: new Map(),
     proctorDailyLoadMap: new Map(),
+    proctorGlobalLoadMap: new Map(),
     proctorTimeRangeMap: new Map(),
     roomTimeRangeMap: new Map(),
   };
@@ -671,6 +750,7 @@ const createUsageTracker = (existingAssignments = [], lookups = null) => {
 
     addToNestedSet(usage.roomSlotMap, assignment.roomId, assignment.timeSlotId);
     addToNestedSet(usage.proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
+    usage.proctorGlobalLoadMap.set(assignment.proctorId, (usage.proctorGlobalLoadMap.get(assignment.proctorId) ?? 0) + 1);
 
     const slotDate = assignment.timeSlot?.date ?? assignment.timeSlot?.startTime;
     if (slotDate) {
@@ -707,6 +787,7 @@ const createUsageTracker = (existingAssignments = [], lookups = null) => {
 const reserveAssignment = (usage, assignment, exam, slot, slotDayKey = toDateKey(slot.date ?? slot.startTime), options = {}) => {
   addToNestedSet(usage.roomSlotMap, assignment.roomId, assignment.timeSlotId);
   addToNestedSet(usage.proctorSlotMap, assignment.proctorId, assignment.timeSlotId);
+  usage.proctorGlobalLoadMap.set(assignment.proctorId, (usage.proctorGlobalLoadMap.get(assignment.proctorId) ?? 0) + 1);
 
   const proctorDayKey = `${assignment.proctorId}:${slotDayKey}`;
   usage.proctorDailyLoadMap.set(proctorDayKey, (usage.proctorDailyLoadMap.get(proctorDayKey) ?? 0) + 1);
@@ -775,21 +856,139 @@ const getAvailableRoomsForSlot = (sortedRooms, slot, usage) => {
   return sortedRooms.filter((room) => isRoomAvailableForSlot(room, slot, usage));
 };
 
-const getAvailableProctorsForSlot = (proctors, slot, usage, slotDayKey) => {
-  return proctors
+const getAvailableProctorsForSlot = (proctors, slot, usage, slotDayKey, proctorsBySlotId = null) => {
+  // When the pre-built reverse index is provided, start from only the proctors
+  // that declared availability for this slot — avoids an O(all proctors) scan.
+  const candidates = proctorsBySlotId !== null
+    ? (proctorsBySlotId.get(slot.id) ?? [])
+    : proctors;
+  return candidates
     .filter((proctor) => isProctorAvailableForSlot(proctor, slot, usage, slotDayKey))
     .sort((a, b) => (
-      (usage.proctorDailyLoadMap.get(`${a.id}:${slotDayKey}`) ?? 0)
+      (usage.proctorGlobalLoadMap.get(a.id) ?? 0)
+      - (usage.proctorGlobalLoadMap.get(b.id) ?? 0)
+      || (usage.proctorDailyLoadMap.get(`${a.id}:${slotDayKey}`) ?? 0)
       - (usage.proctorDailyLoadMap.get(`${b.id}:${slotDayKey}`) ?? 0)
       || (a.user?.name ?? '').localeCompare(b.user?.name ?? '')
     ));
 };
 
-const getProctorsForRoom = (proctors, room) => {
-  return proctors.filter((proctor) => proctor.centerId === room.centerId);
+const getProctorsForRoom = (proctors) => {
+  return proctors;
 };
 
 const getTotalCapacity = (rooms) => rooms.reduce((total, room) => total + room.capacity, 0);
+
+const getUniqueRooms = (rooms) => [...new Map(rooms.map((room) => [room.id, room])).values()];
+
+const roomSetKey = (rooms) => rooms.map((room) => room.id).sort().join(':');
+
+const buildMinimalRoomSets = ({ rooms, requiredSeats, requiredRoomCount = 1, preSorted = false }) => {
+  // Skip the sort when the caller guarantees rooms are already sorted desc by capacity.
+  const sorted = preSorted ? rooms : sortRoomsByCapacityDesc(rooms);
+  const sets = [];
+
+  let selectedCapacity = 0;
+  for (let count = Math.max(1, requiredRoomCount); count <= sorted.length; count += 1) {
+    const selected = sorted.slice(0, count);
+    selectedCapacity = selectedCapacity || getTotalCapacity(selected);
+    if (selectedCapacity >= requiredSeats) {
+      sets.push(selected);
+      break;
+    }
+    selectedCapacity += sorted[count]?.capacity ?? 0;
+  }
+
+  for (const anchor of sorted) {
+    const selected = [anchor];
+    let capacity = anchor.capacity;
+    for (const room of sorted) {
+      if (room.id === anchor.id) continue;
+      selected.push(room);
+      capacity += room.capacity;
+      if (selected.length >= requiredRoomCount && capacity >= requiredSeats) break;
+    }
+    if (selected.length >= requiredRoomCount && capacity >= requiredSeats) {
+      sets.push(getUniqueRooms(selected));
+    }
+  }
+
+  return sets;
+};
+
+const buildCandidateRoomSets = ({ rooms, requiredSeats, requiredProctors, preSorted = false }) => {
+  const roomSets = [];
+  const seen = new Set();
+  const addSet = (set) => {
+    const unique = getUniqueRooms(set);
+    if (unique.length === 0 || getTotalCapacity(unique) < requiredSeats) return;
+    const key = roomSetKey(unique);
+    if (seen.has(key)) return;
+    seen.add(key);
+    roomSets.push(unique);
+  };
+
+  const centerGroups = new Map();
+  for (const room of rooms) {
+    const key = room.centerId ?? room.id;
+    const list = centerGroups.get(key) ?? [];
+    list.push(room);
+    centerGroups.set(key, list);
+  }
+
+  // When rooms are pre-sorted desc by capacity (from getAvailableRoomsForSlot), pass the
+  // flag through so buildMinimalRoomSets can skip redundant re-sorting of the same data.
+  for (const centerRooms of centerGroups.values()) {
+    for (const set of buildMinimalRoomSets({ rooms: centerRooms, requiredSeats, preSorted })) addSet(set);
+  }
+
+  for (const set of buildMinimalRoomSets({ rooms, requiredSeats, preSorted })) addSet(set);
+  for (const set of buildMinimalRoomSets({ rooms, requiredSeats, requiredRoomCount: Math.min(requiredProctors, rooms.length), preSorted })) addSet(set);
+
+  return roomSets.sort((left, right) => (
+    left.length - right.length
+    || new Set(left.map((room) => room.centerId)).size - new Set(right.map((room) => room.centerId)).size
+    || getTotalCapacity(left) - getTotalCapacity(right)
+  )).slice(0, MAX_CANDIDATE_ROOM_SETS);
+};
+
+const buildAllocationForRoomSet = ({ roomSet, availableProctors, requiredProctors, usage, slotDayKey }) => {
+  const allocation = [];
+  const usedProctorIds = new Set();
+
+  for (const room of roomSet) {
+    const proctor = availableProctors.find((candidate) => !usedProctorIds.has(candidate.id));
+    if (!proctor) return null;
+    allocation.push({ room, proctor });
+    usedProctorIds.add(proctor.id);
+  }
+
+  const proctorsNeeded = Math.max(roomSet.length, requiredProctors);
+  while (allocation.length < proctorsNeeded) {
+    const proctor = availableProctors.find((candidate) => !usedProctorIds.has(candidate.id));
+    if (!proctor) return null;
+    allocation.push({ room: roomSet[allocation.length % roomSet.length], proctor });
+    usedProctorIds.add(proctor.id);
+  }
+
+  return allocation;
+};
+
+const compareAllocations = ({ exam, usage, slotDayKey }) => (left, right) => {
+  const leftRooms = getUniqueRooms(left.map(({ room }) => room));
+  const rightRooms = getUniqueRooms(right.map(({ room }) => room));
+  const leftCenters = new Set(leftRooms.map((room) => room.centerId)).size;
+  const rightCenters = new Set(rightRooms.map((room) => room.centerId)).size;
+  const leftCapacity = getTotalCapacity(leftRooms);
+  const rightCapacity = getTotalCapacity(rightRooms);
+  const leftWorkload = getProctorWorkloadPenalty({ allocation: left, usage, slotDayKey });
+  const rightWorkload = getProctorWorkloadPenalty({ allocation: right, usage, slotDayKey });
+
+  return leftRooms.length - rightRooms.length
+    || leftCenters - rightCenters
+    || Math.abs(leftCapacity - exam.requiredSeats) - Math.abs(rightCapacity - exam.requiredSeats)
+    || leftWorkload - rightWorkload;
+};
 
 const getSlotDurationMinutes = (slot) => {
   if (slot.duration) return slot.duration;
@@ -845,76 +1044,42 @@ const canSlotFitExam = (slot, exam) => {
 const isValidAssignment = ({ exam, slot, room, proctor, usage, slotDayKey }) => {
   if (!canSlotFitExam(slot, exam)) return false;
   if (hasStudentOverlap(usage, exam, slot)) return false;
-  if (room.centerId !== proctor.centerId) return false;
   if (!isRoomAvailableForSlot(room, slot, usage)) return false;
   if (room.capacity < exam.requiredSeats) return false;
   return isProctorAvailableForSlot(proctor, slot, usage, slotDayKey);
 };
 
-const buildRoomAllocation = ({ exam, slot, sortedRooms, proctors, usage, slotDayKey }) => {
+const buildRoomAllocation = ({ exam, slot, sortedRooms, proctors, usage, slotDayKey, proctorsBySlotId = null }) => {
   if (!canSlotFitExam(slot, exam)) return null;
   if (hasStudentOverlap(usage, exam, slot)) return null;
 
+  // getAvailableRoomsForSlot filters from sortedRooms which is already sorted desc by
+  // capacity — Array.filter preserves order, so availableRooms is also sorted desc.
   const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
-  const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey);
+  const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey, proctorsBySlotId);
   const requiredProctors = getRequiredProctorsForExam(exam);
 
   if (availableProctors.length < requiredProctors) return null;
 
-  // Single-room fast path: one room seats all students and all proctors come from that room's center.
-  const singleRoom = availableRooms.find((room) => {
-    if (room.capacity < exam.requiredSeats) return false;
-    return getProctorsForRoom(availableProctors, room).length >= requiredProctors;
+  const roomSets = buildCandidateRoomSets({
+    rooms: availableRooms.filter((room) => getProctorsForRoom(availableProctors, room).length > 0),
+    requiredSeats: exam.requiredSeats,
+    requiredProctors,
+    preSorted: true,
   });
-  if (singleRoom) {
-    const roomProctors = getProctorsForRoom(availableProctors, singleRoom);
-    const proctor = roomProctors[0];
-    if (isValidAssignment({ exam, slot, room: singleRoom, proctor, usage, slotDayKey })) {
-      // Assign all required proctors to the same room
-      return roomProctors.slice(0, requiredProctors).map((sup) => ({
-        room: singleRoom,
-        proctor: sup,
-      }));
+
+  let bestAllocation = null;
+  const compare = compareAllocations({ exam, usage, slotDayKey });
+  for (const roomSet of roomSets) {
+    const allocation = buildAllocationForRoomSet({ roomSet, availableProctors, requiredProctors, usage, slotDayKey });
+    if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
+    if (!bestAllocation || compare(allocation, bestAllocation) < 0) {
+      bestAllocation = allocation;
     }
+    break; // room sets are pre-sorted by quality; first valid set is already optimal
   }
 
-  // Multi-room path: accumulate rooms with center-matched proctors until capacity is met.
-  const selectedRooms = [];
-  const allocation = [];
-  const usedProctorIds = new Set();
-  let totalCapacity = 0;
-
-  for (const room of availableRooms) {
-    const proctor = getProctorsForRoom(availableProctors, room)
-      .find((candidate) => !usedProctorIds.has(candidate.id));
-    if (!proctor) continue;
-
-    selectedRooms.push(room);
-    allocation.push({ room, proctor });
-    usedProctorIds.add(proctor.id);
-    totalCapacity += room.capacity;
-    if (totalCapacity >= exam.requiredSeats) break;
-  }
-
-  if (totalCapacity < exam.requiredSeats) return null;
-
-  // Need at least one proctor per room AND requiredProctors total
-  const proctorsNeeded = Math.max(selectedRooms.length, requiredProctors);
-  if (allocation.length < selectedRooms.length) return null;
-
-  for (const room of selectedRooms) {
-    if (allocation.length >= proctorsNeeded) break;
-    const extraProctor = getProctorsForRoom(availableProctors, room)
-      .find((candidate) => !usedProctorIds.has(candidate.id));
-    if (!extraProctor) continue;
-
-    allocation.push({ room, proctor: extraProctor });
-    usedProctorIds.add(extraProctor.id);
-  }
-
-  if (allocation.length < proctorsNeeded) return null;
-
-  return allocation;
+  return bestAllocation;
 };
 
 const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) => {
@@ -929,7 +1094,6 @@ const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) =>
   for (const { room, proctor } of allocation) {
     if (!room || !proctor) return false;
     if (proctorIds.has(proctor.id)) return false;
-    if (room.centerId !== proctor.centerId) return false;
     // Only check room availability on first occurrence (multiple proctors may share a room)
     if (!checkedRoomIds.has(room.id) && !isRoomAvailableForSlot(room, slot, usage)) return false;
     if (!isProctorAvailableForSlot(proctor, slot, usage, slotDayKey)) return false;
@@ -980,7 +1144,7 @@ const getMaxSupervisedCapacity = (rooms, proctorCount) => {
   return getTotalCapacity(sortRoomsByCapacityDesc(rooms).slice(0, proctorCount));
 };
 
-const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys }) => {
+const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, proctorsBySlotId = null }) => {
   const examLabel = getExamLabel(exam);
   const totalRoomCapacity = getTotalCapacity(sortedRooms);
   const requiredProctors = getRequiredProctorsForExam(exam);
@@ -1059,7 +1223,7 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
 
   const everyNonOverlappingSlotHasNoProctor = timeSlots
     .filter((slot) => !hasStudentOverlap(usage, exam, slot))
-    .every((slot) => getAvailableProctorsForSlot(proctors, slot, usage, slotDayKeys.get(slot.id)).length < requiredProctors);
+    .every((slot) => getAvailableProctorsForSlot(proctors, slot, usage, slotDayKeys.get(slot.id), proctorsBySlotId).length < requiredProctors);
 
   if (everyNonOverlappingSlotHasNoProctor) {
     const proctorLabel = getProctorSampleLabel(proctors);
@@ -1079,7 +1243,7 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
   if (capacityEligibleSlots.length > 0) {
     const everyCapacityEligibleSlotFailsProctorAllocation = capacityEligibleSlots.every((slot) => {
       const slotDayKey = slotDayKeys.get(slot.id);
-      const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey });
+      const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey, proctorsBySlotId });
       return !isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey });
     });
 
@@ -1098,7 +1262,7 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
 
     const slotDayKey = slotDayKeys.get(slot.id);
     const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
-    const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey);
+    const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey, proctorsBySlotId);
 
     return getTotalCapacity(availableRooms) >= exam.requiredSeats &&
       availableProctors.length >= requiredProctors;
@@ -1174,6 +1338,20 @@ const orderTimeSlotsForStrategy = (timeSlots, strategyId) => {
   return ordered;
 };
 
+const buildFittingSlotCache = (exams, timeSlots, strategyId) => {
+  const cache = new Map();
+  for (const exam of exams) {
+    cache.set(
+      exam.id,
+      orderTimeSlotsForStrategy(
+        timeSlots.filter((slot) => canSlotFitExam(slot, exam)),
+        strategyId,
+      ),
+    );
+  }
+  return cache;
+};
+
 const getUniqueAllocationRooms = (allocation) => [...new Map(
   allocation.map(({ room }) => [room.id, room]),
 ).values()];
@@ -1201,13 +1379,20 @@ const getProctorWorkloadPenalty = ({ allocation, usage, slotDayKey }) => {
   const uniqueProctors = getUniqueAllocationProctors(allocation);
   if (uniqueProctors.length === 0) return 100;
 
-  const projectedLoadRatios = uniqueProctors.map((proctor) => {
+  const projectedDailyLoadRatios = uniqueProctors.map((proctor) => {
     const currentLoad = usage.proctorDailyLoadMap.get(`${proctor.id}:${slotDayKey}`) ?? 0;
     const maxDailyLoad = Math.max(1, proctor.maxExamsPerDay ?? 1);
     return Math.min(1, (currentLoad + 1) / maxDailyLoad);
   });
 
-  return clampScore(average(projectedLoadRatios) * 100);
+  const globalLoads = [...(usage.proctorGlobalLoadMap ?? new Map()).values()];
+  const averageGlobalLoad = globalLoads.length === 0 ? 0 : average(globalLoads);
+  const projectedGlobalLoads = uniqueProctors.map((proctor) => (usage.proctorGlobalLoadMap?.get(proctor.id) ?? 0) + 1);
+  const globalLoadPenalty = averageGlobalLoad <= 0
+    ? 0
+    : clampScore(average(projectedGlobalLoads.map((load) => Math.max(0, load - averageGlobalLoad) / Math.max(1, averageGlobalLoad))) * 100);
+
+  return clampScore((average(projectedDailyLoadRatios) * 55) + (globalLoadPenalty * 45));
 };
 
 const getStudentDailyLoadPenalty = ({ exam, usage, slotDayKey }) => {
@@ -1233,10 +1418,17 @@ const getRoomCenterSpreadPenalty = (exam, uniqueRooms) => {
   return clampScore((roomSpreadPenalty * 0.4) + (centerSpreadPenalty * 0.6));
 };
 
+const getRoomCountPenalty = (exam, uniqueRooms) => {
+  if (uniqueRooms.length <= 1) return 0;
+  const maxRooms = Math.max(1, getRequiredProctorsForExam(exam), uniqueRooms.length);
+  return normalizePenaltyRatio(uniqueRooms.length - 1, maxRooms - 1);
+};
+
 const scoreNormalizedCandidatePenalty = ({ exam, allocation, usage, slotDayKey }) => {
   const uniqueRooms = getUniqueAllocationRooms(allocation);
   const components = {
     unusedRoomSeats: getUnusedRoomSeatsPenalty(exam, uniqueRooms),
+    roomCount: getRoomCountPenalty(exam, uniqueRooms),
     proctorWorkload: getProctorWorkloadPenalty({ allocation, usage, slotDayKey }),
     studentDailyLoad: getStudentDailyLoadPenalty({ exam, usage, slotDayKey }),
     roomCenterSpread: getRoomCenterSpreadPenalty(exam, uniqueRooms),
@@ -1253,10 +1445,10 @@ const scoreNormalizedCandidatePenalty = ({ exam, allocation, usage, slotDayKey }
   };
 };
 
-const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy }) => {
+const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy, fittingSlotCache = null, proctorsBySlotId = null }) => {
   if (!hasEnrollmentConstraintSatisfied(exam)) return [];
 
-  const fittingSlots = orderTimeSlotsForStrategy(
+  const fittingSlots = fittingSlotCache?.get(exam.id) ?? orderTimeSlotsForStrategy(
     timeSlots.filter((slot) => canSlotFitExam(slot, exam)),
     strategy.id,
   );
@@ -1266,7 +1458,7 @@ const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, u
     if (hasStudentOverlap(usage, exam, slot)) continue;
     const slotDayKey = slotDayKeys.get(slot.id);
     if (!hasStudentDailyLoadCapacity(usage, exam, slotDayKey)) continue;
-    const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey });
+    const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey, proctorsBySlotId });
     if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
 
     const penalty = scoreNormalizedCandidatePenalty({ exam, allocation, usage, slotDayKey });
@@ -1283,12 +1475,13 @@ const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, u
   return candidates.sort((a, b) => a.softPenalty - b.softPenalty || a.slot.startTime - b.slot.startTime);
 };
 
-const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, existingAssignments, lookups = null, strategy = {} }) => {
+const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, existingAssignments, lookups = null, strategy = {}, proctorsBySlotId = null }) => {
   const usage = createUsageTracker(existingAssignments, lookups);
   const roomSorter = strategy.roomSorter ?? sortRoomsByCapacityDesc;
   const examComparator = strategy.examComparator ?? compareExamsForScheduling;
   const sortedRooms = roomSorter(rooms);
   const slotDayKeys = buildSlotDayKeyMap(timeSlots);
+  const fittingSlotCache = buildFittingSlotCache(exams, timeSlots, strategy.id);
   const assignmentInserts = [];
   const conflictInserts = [];
   const scheduledExamIds = [];
@@ -1305,6 +1498,8 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
       usage,
       slotDayKeys,
       strategy,
+      fittingSlotCache,
+      proctorsBySlotId,
     });
 
     if (candidates.length === 0) {
@@ -1316,6 +1511,7 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
         proctors,
         usage,
         slotDayKeys,
+        proctorsBySlotId,
       }));
       continue;
     }
@@ -1376,6 +1572,96 @@ const variance = (values) => {
   if (values.length <= 1) return 0;
   const mean = average(values);
   return average(values.map((value) => (value - mean) ** 2));
+};
+
+// eligibleProctorCount: proctors who declared availability for at least one slot.
+// When omitted it falls back to workloadValues.length (all known proctors), which
+// correctly penalises under-utilisation when more proctors could have been used.
+const calculateProctorWorkloadBalance = (workloadValues, eligibleProctorCount = null) => {
+  const totalAssignments = workloadValues.reduce((total, load) => total + load, 0);
+  if (totalAssignments === 0) {
+    return {
+      totalAssignments,
+      idealLoad: 0,
+      idealActiveLoad: 0,
+      scoringProctorCount: 0,
+      activeProctorCount: 0,
+      unusedProctorCount: workloadValues.length,
+      scoredLoads: [],
+      proctorBalancePenalty: 0,
+      maxProctorBalancePenalty: 0,
+      balanceAmongActive: 100,
+      coverageScore: 100,
+      proctorWorkloadBalance: 100,
+      proctorLoadHistogram: {},
+    };
+  }
+
+  // ── Active-only balance ───────────────────────────────────────────────────
+  // Measures how evenly the *assigned* proctors share load.
+  const activeLoads = workloadValues.filter((load) => load > 0);
+  const activeProctorCount = activeLoads.length;
+
+  let balanceAmongActive;
+  if (activeProctorCount <= 1) {
+    balanceAmongActive = activeProctorCount === 0 || totalAssignments === 1 ? 100 : 0;
+  } else {
+    const idealActiveLoad = totalAssignments / activeProctorCount;
+    const activePenalty = activeLoads.reduce((t, l) => t + Math.abs(l - idealActiveLoad), 0);
+    const maxActivePenalty = (totalAssignments - idealActiveLoad) + (activeProctorCount - 1) * idealActiveLoad;
+    balanceAmongActive = maxActivePenalty === 0
+      ? 100
+      : clampScore(100 - (activePenalty / maxActivePenalty) * 100);
+  }
+
+  // ── Coverage breadth ──────────────────────────────────────────────────────
+  // Rewards spreading across more unique proctors.
+  // Denominator = min(assignments, ELIGIBLE proctors) — proctors who could ever
+  // be assigned (have declared availability for at least one slot).  Using the
+  // full 199-proctor pool as denominator incorrectly penalises when 169 of them
+  // have zero availability for any slot in the semester.
+  const feasiblePoolSize = eligibleProctorCount !== null
+    ? eligibleProctorCount
+    : workloadValues.length;
+  const idealUniqueProctors = Math.max(1, Math.min(totalAssignments, feasiblePoolSize));
+  const coverageScore = clampScore((activeProctorCount / idealUniqueProctors) * 100);
+
+  // ── Combined score: 65% balance quality + 35% coverage breadth ───────────
+  const proctorWorkloadBalance = clampScore(balanceAmongActive * 0.65 + coverageScore * 0.35);
+
+  // ── Legacy penalty fields (kept for diagnostics / qualityMetrics export) ─
+  const sortedLoads = [...workloadValues].sort((a, b) => b - a);
+  const scoringProctorCount = Math.max(1, Math.min(totalAssignments, workloadValues.length));
+  const scoredLoads = sortedLoads.slice(0, scoringProctorCount);
+  while (scoredLoads.length < scoringProctorCount) scoredLoads.push(0);
+  const idealLoad = totalAssignments / scoringProctorCount;
+  const proctorBalancePenalty = scoredLoads.reduce((total, load) => total + Math.abs(load - idealLoad), 0);
+  const maxProctorBalancePenalty = scoringProctorCount <= 1
+    ? 0
+    : (totalAssignments - idealLoad) + ((scoringProctorCount - 1) * idealLoad);
+
+  const proctorLoadHistogram = Object.fromEntries(
+    [...workloadValues.reduce((histogram, load) => {
+      histogram.set(load, (histogram.get(load) ?? 0) + 1);
+      return histogram;
+    }, new Map()).entries()].sort((a, b) => Number(a[0]) - Number(b[0])),
+  );
+
+  return {
+    totalAssignments,
+    idealLoad,
+    idealActiveLoad: activeProctorCount > 0 ? totalAssignments / activeProctorCount : 0,
+    scoringProctorCount,
+    activeProctorCount,
+    unusedProctorCount: workloadValues.filter((load) => load === 0).length,
+    scoredLoads,
+    proctorBalancePenalty,
+    maxProctorBalancePenalty,
+    balanceAmongActive,
+    coverageScore,
+    proctorWorkloadBalance,
+    proctorLoadHistogram,
+  };
 };
 
 const getDayDistance = (left, right) => Math.abs(
@@ -1515,15 +1801,17 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
     : clampScore((totalUsedSeats / totalAvailableSeats) * 100);
 
   const workloadValues = [...proctorWorkloads.values()];
-  const totalAssignments = workloadValues.reduce((total, load) => total + load, 0);
-  const idealLoad = proctorIds.length === 0 ? 0 : totalAssignments / proctorIds.length;
-  const proctorBalancePenalty = workloadValues.reduce((total, load) => total + Math.abs(load - idealLoad), 0);
-  const maxProctorBalancePenalty = totalAssignments === 0 || proctorIds.length <= 1
-    ? 0
-    : 2 * totalAssignments * (1 - (1 / proctorIds.length));
-  const proctorWorkloadBalance = maxProctorBalancePenalty === 0
-    ? (totalAssignments === 0 ? 100 : 0)
-    : clampScore(100 - ((proctorBalancePenalty / maxProctorBalancePenalty) * 100));
+  // Eligible proctors = those with availability for at least one slot in THIS semester.
+  // proctorsBySlotId is built from current-semester slots only, so it correctly
+  // excludes proctors whose declared availability belongs to other semesters.
+  const semesterEligibleProctors = new Set();
+  for (const slot of normalized.timeSlots) {
+    for (const p of (normalized.proctorsBySlotId?.get(slot.id) ?? [])) {
+      semesterEligibleProctors.add(p.id);
+    }
+  }
+  const eligibleProctorCount = semesterEligibleProctors.size;
+  const proctorBalance = calculateProctorWorkloadBalance(workloadValues, eligibleProctorCount);
 
   const spacingMetrics = calculateStudentSpacingMetrics(studentSlotEntries);
   const distributionValues = [...dayExamCounts.values()];
@@ -1538,7 +1826,7 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
   const centerProximity = clampScore(100 - (centerSpreadPenalty * 8));
   const metrics = {
     roomUtilization: roundMetric(roomUtilization),
-    proctorWorkloadBalance: roundMetric(proctorWorkloadBalance),
+    proctorWorkloadBalance: roundMetric(proctorBalance.proctorWorkloadBalance),
     studentSpacing: roundMetric(spacingMetrics.studentSpacing),
     examDistribution: roundMetric(examDistribution),
     preferredSpacing: roundMetric(spacingMetrics.preferredSpacing),
@@ -1568,9 +1856,19 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
       ...metrics,
       totalUsedSeats,
       totalAvailableSeats,
-      idealProctorLoad: roundMetric(idealLoad),
-      proctorBalancePenalty: roundMetric(proctorBalancePenalty),
-      normalizedProctorBalancePenalty: roundMetric(100 - proctorWorkloadBalance),
+      totalAssignments: proctorBalance.totalAssignments,
+      totalProctors: proctorIds.length,
+      activeProctorCount: proctorBalance.activeProctorCount,
+      unusedProctorCount: proctorBalance.unusedProctorCount,
+      proctorBalanceScoringPool: proctorBalance.scoringProctorCount,
+      idealProctorLoad: roundMetric(proctorBalance.idealLoad),
+      idealActiveProctorLoad: roundMetric(proctorBalance.idealActiveLoad),
+      proctorBalancePenalty: roundMetric(proctorBalance.proctorBalancePenalty),
+      normalizedProctorBalancePenalty: roundMetric(100 - proctorBalance.proctorWorkloadBalance),
+      proctorBalanceAmongActive: roundMetric(proctorBalance.balanceAmongActive),
+      proctorCoverageScore: roundMetric(proctorBalance.coverageScore),
+      proctorLoadHistogram: proctorBalance.proctorLoadHistogram,
+      proctorScoredLoads: proctorBalance.scoredLoads,
       totalStudentExamPairs: spacingMetrics.totalPairs,
       preferredGapSatisfied: spacingMetrics.preferredGapSatisfied,
       sameDayPairCount: spacingMetrics.sameDayPairCount,
@@ -1596,14 +1894,19 @@ const withQualityEvaluation = (normalized, draft, originalEvaluation = null) => 
   };
 };
 
-const createUsageFromDraft = ({ normalized, draft, excludedExamId = null }) => {
+const createUsageFromDraft = ({ normalized, draft, excludedExamId = null, excludedExamIds = null }) => {
   const usage = createUsageTracker(normalized.existingAssignments, normalized.lookups);
   const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
   const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
   const reservedStudentExamSlots = new Set();
+  const excludedSet = excludedExamIds instanceof Set
+    ? excludedExamIds
+    : excludedExamId
+      ? new Set([excludedExamId])
+      : null;
 
   for (const assignment of draft.assignmentInserts) {
-    if (assignment.examId === excludedExamId) continue;
+    if (excludedSet?.has(assignment.examId)) continue;
     const exam = examById.get(assignment.examId);
     const slot = slotById.get(assignment.timeSlotId);
     if (!exam || !slot) continue;
@@ -1616,6 +1919,349 @@ const createUsageFromDraft = ({ normalized, draft, excludedExamId = null }) => {
   }
 
   return usage;
+};
+
+const isSameDraftAssignment = (left, right) => left.examId === right.examId
+  && left.roomId === right.roomId
+  && left.proctorId === right.proctorId
+  && left.timeSlotId === right.timeSlotId;
+
+const createUsageFromDraftExcludingAssignment = ({ normalized, draft, excludedAssignment }) => {
+  const usage = createUsageTracker(normalized.existingAssignments, normalized.lookups);
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const reservedStudentExamSlots = new Set();
+  let skipped = false;
+
+  for (const assignment of draft.assignmentInserts) {
+    if (!skipped && isSameDraftAssignment(assignment, excludedAssignment)) {
+      skipped = true;
+      continue;
+    }
+    const exam = examById.get(assignment.examId);
+    const slot = slotById.get(assignment.timeSlotId);
+    if (!exam || !slot) continue;
+    const slotDayKey = toDateKey(slot.date ?? slot.startTime);
+    const studentReservationKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    reserveAssignment(usage, assignment, exam, slot, slotDayKey, {
+      reserveStudents: !reservedStudentExamSlots.has(studentReservationKey),
+    });
+    reservedStudentExamSlots.add(studentReservationKey);
+  }
+
+  return usage;
+};
+
+const replaceAssignmentProctor = ({ draft, targetAssignment, replacementProctorId }) => {
+  let replaced = false;
+  return {
+    ...draft,
+    assignmentInserts: draft.assignmentInserts.map((assignment) => {
+      if (!replaced && isSameDraftAssignment(assignment, targetAssignment)) {
+        replaced = true;
+        return { ...assignment, proctorId: replacementProctorId };
+      }
+      return assignment;
+    }),
+  };
+};
+
+// Computes the theoretical maximum ProctorBalance score achievable given current
+// proctor availability declarations. Uses a greedy round-robin that assigns each
+// "proctor slot" in the draft to the least-loaded eligible proctor.
+// Result tells us whether the current score is near the feasibility ceiling or
+// whether the optimizer is leaving improvements on the table.
+const computeProctorBalanceCeiling = ({ normalized, draft }) => {
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+
+  // Group draft assignments by slot
+  const assignmentsBySlot = new Map();
+  for (const assignment of draft.assignmentInserts) {
+    if (!assignmentsBySlot.has(assignment.timeSlotId)) {
+      assignmentsBySlot.set(assignment.timeSlotId, []);
+    }
+    assignmentsBySlot.get(assignment.timeSlotId).push(assignment);
+  }
+
+  // For each slot, count eligible proctors (availability only, no load/booking constraint)
+  const eligibleCountBySlot = new Map();
+  for (const slotId of assignmentsBySlot.keys()) {
+    const count = normalized.proctors.filter((p) => p.availableTimeSlotIds?.has(slotId)).length;
+    eligibleCountBySlot.set(slotId, count);
+  }
+
+  const slotEligibleCounts = [...eligibleCountBySlot.values()];
+  const minEligible = slotEligibleCounts.length > 0 ? Math.min(...slotEligibleCounts) : 0;
+  const maxEligible = slotEligibleCounts.length > 0 ? Math.max(...slotEligibleCounts) : 0;
+  const avgEligible = slotEligibleCounts.length > 0
+    ? slotEligibleCounts.reduce((t, v) => t + v, 0) / slotEligibleCounts.length
+    : 0;
+
+  // Greedy assignment: most-constrained slots first, pick least-loaded eligible proctor
+  const sortedSlots = [...assignmentsBySlot.entries()]
+    .sort((a, b) => (eligibleCountBySlot.get(a[0]) ?? 0) - (eligibleCountBySlot.get(b[0]) ?? 0));
+
+  const greedyLoad = new Map(normalized.proctors.map((p) => [p.id, 0]));
+  const greedySlotBooked = new Map();
+  let unassignable = 0;
+
+  for (const [slotId, assignments] of sortedSlots) {
+    const eligible = normalized.proctors
+      .filter((p) => p.availableTimeSlotIds?.has(slotId));
+    const booked = greedySlotBooked.get(slotId) ?? new Set();
+
+    for (let i = 0; i < assignments.length; i++) {
+      const available = eligible
+        .filter((p) => !booked.has(p.id))
+        .sort((a, b) => (greedyLoad.get(a.id) ?? 0) - (greedyLoad.get(b.id) ?? 0));
+
+      if (available.length === 0) { unassignable += 1; continue; }
+      const chosen = available[0];
+      greedyLoad.set(chosen.id, (greedyLoad.get(chosen.id) ?? 0) + 1);
+      booked.add(chosen.id);
+      greedySlotBooked.set(slotId, booked);
+    }
+  }
+
+  const workloadValues = [...greedyLoad.values()];
+  // Eligible = unique proctors available for any slot in this semester
+  const ceilingEligibleSet = new Set();
+  for (const slot of normalized.timeSlots) {
+    for (const p of (normalized.proctorsBySlotId?.get(slot.id) ?? [])) {
+      ceilingEligibleSet.add(p.id);
+    }
+  }
+  const ceilingEligible = ceilingEligibleSet.size;
+  const ceiling = calculateProctorWorkloadBalance(workloadValues, ceilingEligible);
+
+  return {
+    minEligiblePerSlot: minEligible,
+    maxEligiblePerSlot: maxEligible,
+    avgEligiblePerSlot: avgEligible,
+    unassignable,
+    ceilingScore: ceiling.proctorWorkloadBalance,
+    ceilingActiveProctors: ceiling.activeProctorCount,
+    ceilingBalanceAmongActive: ceiling.balanceAmongActive,
+    ceilingCoverageScore: ceiling.coverageScore,
+    ceilingHistogram: ceiling.proctorLoadHistogram,
+  };
+};
+
+const buildDraftProctorLoadStats = ({ normalized, draft }) => {
+  const proctorIds = normalized.proctors.map((proctor) => proctor.id);
+  const loadByProctorId = new Map(proctorIds.map((id) => [id, 0]));
+  for (const assignment of draft.assignmentInserts) {
+    loadByProctorId.set(assignment.proctorId, (loadByProctorId.get(assignment.proctorId) ?? 0) + 1);
+  }
+  const totalAssignments = [...loadByProctorId.values()].reduce((total, load) => total + load, 0);
+  const scoringProctorCount = Math.max(1, Math.min(totalAssignments, proctorIds.length));
+  const idealLoad = totalAssignments === 0 ? 0 : totalAssignments / scoringProctorCount;
+  const stats = normalized.proctors.map((proctor) => {
+    const load = loadByProctorId.get(proctor.id) ?? 0;
+    return {
+      proctor,
+      load,
+      idealLoad,
+      deviation: Math.abs(load - idealLoad),
+      overload: load - idealLoad,
+    };
+  });
+  const activeStats = stats.filter((entry) => entry.load > 0);
+
+  return {
+    idealLoad,
+    scoringProctorCount,
+    loadByProctorId,
+    overloaded: activeStats.filter((entry) => entry.overload > 0.25).sort((a, b) => b.overload - a.overload || b.deviation - a.deviation),
+    underused: stats.filter((entry) => entry.load < idealLoad).sort((a, b) => a.load - b.load || b.deviation - a.deviation),
+  };
+};
+
+const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
+  if ((draft.qualityEvaluation?.metrics?.proctorWorkloadBalance ?? 100) >= 85) {
+    return { draft, repairs: [] };
+  }
+
+  let bestDraft = draft;
+  const repairs = [];
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  let reassignmentCount = 0;
+
+  while (reassignmentCount < PROCTOR_REBALANCE_MAX_REASSIGNMENTS) {
+    const stats = buildDraftProctorLoadStats({ normalized, draft: bestDraft });
+
+    // ── First-iteration diagnosis (printed once per rebalance call) ──────────
+    if (reassignmentCount === 0) {
+      const diagUnderused = stats.underused.length;
+      const diagOverloaded = stats.overloaded.length;
+      const diagTotalProctors = normalized.proctors.length;
+      const diagActiveProctors = normalized.proctors.filter(
+        (p) => (stats.loadByProctorId.get(p.id) ?? 0) > 0,
+      ).length;
+      console.warn(
+        `[PROCTOR_DIAG] Pool: total=${diagTotalProctors} active=${diagActiveProctors}`
+        + ` overloaded=${diagOverloaded} underused=${diagUnderused}`
+        + ` idealLoad=${stats.idealLoad.toFixed(2)}`,
+      );
+
+      // Theoretical ceiling under availability constraints
+      const ceiling = computeProctorBalanceCeiling({ normalized, draft: bestDraft });
+      console.warn(
+        `[PROCTOR_DIAG] Ceiling: score=${ceiling.ceilingScore.toFixed(1)}%`
+        + ` active=${ceiling.ceilingActiveProctors}`
+        + ` balanceAmongActive=${ceiling.ceilingBalanceAmongActive.toFixed(1)}%`
+        + ` coverage=${ceiling.ceilingCoverageScore.toFixed(1)}%`
+        + ` eligiblePerSlot=min:${ceiling.minEligiblePerSlot} avg:${ceiling.avgEligiblePerSlot.toFixed(1)} max:${ceiling.maxEligiblePerSlot}`
+        + ` unassignable=${ceiling.unassignable}`,
+      );
+
+      // Per-assignment availability probe for top overloaded proctors
+      // Now probes ALL proctors with lower load (not just underused ones)
+      let rejNoAvailSlot = 0;
+      let rejAlreadyBooked = 0;
+      let rejDailyMax = 0;
+      let rejHardConstraint = 0;
+      let rejNoBalanceGain = 0;
+      let diagFeasible = 0;
+
+      for (const overloadedEntry of stats.overloaded.slice(0, 3)) {
+        const diagAssignments = bestDraft.assignmentInserts.filter(
+          (a) => a.proctorId === overloadedEntry.proctor.id,
+        );
+        for (const diagAssign of diagAssignments) {
+          const diagSlot = slotById.get(diagAssign.timeSlotId);
+          if (!diagSlot) continue;
+          const diagDayKey = toDateKey(diagSlot.date ?? diagSlot.startTime);
+          const diagUsage = createUsageFromDraftExcludingAssignment({
+            normalized, draft: bestDraft, excludedAssignment: diagAssign,
+          });
+          // Probe ALL proctors with lower load (includes active low-load proctors)
+          const probePool = normalized.proctors
+            .filter((p) => p.id !== diagAssign.proctorId)
+            .filter((p) => (stats.loadByProctorId.get(p.id) ?? 0) < overloadedEntry.load)
+            .slice(0, 80);
+          for (const rp of probePool) {
+            if (!rp.availableTimeSlotIds?.has(diagSlot.id)) { rejNoAvailSlot += 1; continue; }
+            if (diagUsage.proctorSlotMap.get(rp.id)?.has(diagSlot.id)) { rejAlreadyBooked += 1; continue; }
+            const rpDayKey = `${rp.id}:${diagDayKey}`;
+            if ((diagUsage.proctorDailyLoadMap.get(rpDayKey) ?? 0) >= rp.maxExamsPerDay) {
+              rejDailyMax += 1; continue;
+            }
+            diagFeasible += 1;
+            const diagCandidate = replaceAssignmentProctor({
+              draft: bestDraft,
+              targetAssignment: diagAssign,
+              replacementProctorId: rp.id,
+            });
+            const diagIssues = confirmHybridDraft({ draft: diagCandidate, normalized });
+            if (diagIssues.length > 0) { rejHardConstraint += 1; diagFeasible -= 1; continue; }
+            const diagEval = withQualityEvaluation(normalized, diagCandidate, originalEvaluation);
+            const diagBal = diagEval.qualityEvaluation.metrics.proctorWorkloadBalance
+              - bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance;
+            if (diagBal <= 0) { rejNoBalanceGain += 1; }
+          }
+        }
+      }
+      console.warn(
+        `[PROCTOR_DIAG] Rejection reasons (top-3 overloaded × lower-load pool):`
+        + ` noAvailability=${rejNoAvailSlot}`
+        + ` alreadyBooked=${rejAlreadyBooked}`
+        + ` dailyMax=${rejDailyMax}`
+        + ` hardConstraint=${rejHardConstraint}`
+        + ` noBalanceGain=${rejNoBalanceGain}`
+        + ` actuallyFeasible=${diagFeasible}`,
+      );
+    }
+    // ── End diagnosis ────────────────────────────────────────────────────────
+
+    // Break only if there are no overloaded proctors (underused-pool exhaustion is
+    // no longer a reliable exit: we now use a broader candidate pool below).
+    if (stats.overloaded.length === 0) break;
+
+    let bestMove = null;
+
+    for (const overloadedEntry of stats.overloaded.slice(0, PROCTOR_REBALANCE_OVERLOADED_SCAN_LIMIT)) {
+      const overloadedAssignments = bestDraft.assignmentInserts
+        .filter((assignment) => assignment.proctorId === overloadedEntry.proctor.id)
+        .sort((a, b) => {
+          const examA = examById.get(a.examId);
+          const examB = examById.get(b.examId);
+          return (examB?.studentIds?.length ?? 0) - (examA?.studentIds?.length ?? 0);
+        });
+
+      for (const assignment of overloadedAssignments) {
+        const exam = examById.get(assignment.examId);
+        const slot = slotById.get(assignment.timeSlotId);
+        const room = normalized.rooms.find((candidateRoom) => candidateRoom.id === assignment.roomId);
+        if (!exam || !slot || !room) continue;
+
+        const slotDayKey = toDateKey(slot.date ?? slot.startTime);
+        const usage = createUsageFromDraftExcludingAssignment({ normalized, draft: bestDraft, excludedAssignment: assignment });
+
+        // ── Broader candidate pool ─────────────────────────────────────────
+        // Previously only zero-load proctors (load < idealLoad=1) were candidates.
+        // That excluded active proctors with low loads who could absorb assignments
+        // from overloaded proctors and improve balanceAmongActive.
+        // Now: any proctor with load strictly less than the overloaded proctor's
+        // load is eligible, sorted least-loaded first so least-loaded gets priority.
+        const replacementCandidates = normalized.proctors
+          .filter((proctor) => proctor.id !== assignment.proctorId)
+          .filter((proctor) => (stats.loadByProctorId.get(proctor.id) ?? 0) < overloadedEntry.load)
+          .sort((a, b) => (stats.loadByProctorId.get(a.id) ?? 0) - (stats.loadByProctorId.get(b.id) ?? 0))
+          .filter((proctor) => isProctorAvailableForSlot(proctor, slot, usage, slotDayKey))
+          .slice(0, PROCTOR_REBALANCE_CANDIDATE_LIMIT);
+
+        for (const replacementProctor of replacementCandidates) {
+          const candidateDraft = replaceAssignmentProctor({
+            draft: bestDraft,
+            targetAssignment: assignment,
+            replacementProctorId: replacementProctor.id,
+          });
+          const hardIssues = confirmHybridDraft({ draft: candidateDraft, normalized });
+          if (hardIssues.length > 0) continue;
+
+          const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, originalEvaluation);
+          const scoreGain = evaluatedDraft.qualityEvaluation.score - bestDraft.qualityEvaluation.score;
+          const balanceGain = evaluatedDraft.qualityEvaluation.metrics.proctorWorkloadBalance
+            - bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance;
+          if (balanceGain <= 0) continue;
+
+          const recipientLoad = stats.loadByProctorId.get(replacementProctor.id) ?? 0;
+          const moveRank = (balanceGain * 5) + scoreGain + Math.max(0, stats.idealLoad - recipientLoad);
+          if (!bestMove || moveRank > bestMove.moveRank) {
+            bestMove = {
+              assignment,
+              replacementProctor,
+              evaluatedDraft,
+              scoreGain,
+              balanceGain,
+              moveRank,
+            };
+          }
+        }
+      }
+    }
+
+    if (!bestMove) break;
+
+    repairs.push({
+      examId: bestMove.assignment.examId,
+      fromProctorId: bestMove.assignment.proctorId,
+      toProctorId: bestMove.replacementProctor.id,
+      fromScore: bestDraft.qualityEvaluation.score,
+      toScore: bestMove.evaluatedDraft.qualityEvaluation.score,
+      improvement: roundMetric(bestMove.scoreGain),
+      proctorBalanceImprovement: roundMetric(bestMove.balanceGain),
+      focusMetric: 'proctorWorkloadBalance',
+    });
+    bestDraft = bestMove.evaluatedDraft;
+    reassignmentCount += 1;
+
+    if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 0) >= 85) break;
+  }
+
+  return { draft: bestDraft, repairs };
 };
 
 const replaceExamAssignments = ({ draft, examId, candidate }) => {
@@ -1647,6 +2293,362 @@ const replaceExamAssignments = ({ draft, examId, candidate }) => {
   };
 };
 
+const getWeakMetricWeights = (metrics = {}) => ({
+  roomUtilization: metrics.roomUtilization < 78 ? 1.75 : 0.8,
+  proctorWorkloadBalance: metrics.proctorWorkloadBalance < 50 ? 5 : metrics.proctorWorkloadBalance < 78 ? 2.8 : 0.9,
+  studentSpacing: metrics.studentSpacing < 78 ? 2.35 : 1,
+  examDistribution: metrics.examDistribution < 78 ? 2 : 0.85,
+  preferredSpacing: metrics.preferredSpacing < 78 ? 2.15 : 0.9,
+});
+
+const getFocusedMetricWeights = (metrics = {}, focusMetric = null) => {
+  const weights = getWeakMetricWeights(metrics);
+  if (!focusMetric) return weights;
+  return {
+    ...weights,
+    [focusMetric]: Math.max(weights[focusMetric] ?? 1, 3),
+    ...(focusMetric === 'studentSpacing' ? { preferredSpacing: Math.max(weights.preferredSpacing, 2.8) } : {}),
+    ...(focusMetric === 'preferredSpacing' ? { studentSpacing: Math.max(weights.studentSpacing, 2.8) } : {}),
+  };
+};
+
+const getMetricRepairOrder = (metrics = {}) => [
+  ['proctorWorkloadBalance', metrics.proctorWorkloadBalance ?? 100],
+  ['studentSpacing', metrics.studentSpacing ?? 100],
+  ['preferredSpacing', metrics.preferredSpacing ?? 100],
+  ['examDistribution', metrics.examDistribution ?? 100],
+  ['roomUtilization', metrics.roomUtilization ?? 100],
+]
+  .filter(([, score]) => score < 88)
+  .sort((a, b) => a[1] - b[1])
+  .map(([metric]) => metric)
+  .slice(0, 3);
+
+const buildDraftMoveIndexes = ({ normalized, draft }) => {
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const examSlotId = new Map();
+  const dayExamCounts = new Map(
+    [...new Set(normalized.timeSlots.map((slot) => toDateKey(slot.date ?? slot.startTime)))]
+      .map((dayKey) => [dayKey, 0]),
+  );
+
+  for (const assignment of draft.assignmentInserts) {
+    if (examSlotId.has(assignment.examId)) continue;
+    examSlotId.set(assignment.examId, assignment.timeSlotId);
+    const slot = slotById.get(assignment.timeSlotId);
+    if (!slot) continue;
+    const dayKey = toDateKey(slot.date ?? slot.startTime);
+    dayExamCounts.set(dayKey, (dayExamCounts.get(dayKey) ?? 0) + 1);
+  }
+
+  return { slotById, examSlotId, dayExamCounts };
+};
+
+const scoreExamOptimizationPriority = ({ exam, score, weakWeights }) => {
+  const components = score?.penaltyComponents ?? {};
+  return roundMetric(
+    ((score?.softPenalty ?? 0) * 1.35)
+    + ((components.proctorWorkload ?? 0) * weakWeights.proctorWorkloadBalance)
+    + ((components.studentDailyLoad ?? 0) * (weakWeights.studentSpacing + weakWeights.preferredSpacing) * 0.6)
+    + ((components.unusedRoomSeats ?? 0) * weakWeights.roomUtilization)
+    + ((components.roomCount ?? 0) * 0.5)
+    + (exam.studentIds.length * 0.015),
+  );
+};
+
+const estimateCandidateMoveImpact = ({ candidate, currentScore, draftIndexes, weakWeights }) => {
+  const currentComponents = currentScore?.penaltyComponents ?? {};
+  const candidateComponents = candidate.penalty?.components ?? {};
+  const currentSlotId = draftIndexes.examSlotId.get(currentScore?.examId);
+  const currentSlot = draftIndexes.slotById.get(currentSlotId);
+  const currentDayKey = currentSlot ? toDateKey(currentSlot.date ?? currentSlot.startTime) : null;
+  const candidateDayKey = candidate.slotDayKey ?? toDateKey(candidate.slot.date ?? candidate.slot.startTime);
+  const currentDayCount = currentDayKey ? (draftIndexes.dayExamCounts.get(currentDayKey) ?? 0) : 0;
+  const candidateDayCount = draftIndexes.dayExamCounts.get(candidateDayKey) ?? 0;
+  const distributionGain = currentDayKey && currentDayKey !== candidateDayKey
+    ? clampScore((currentDayCount - candidateDayCount) * 12)
+    : 0;
+
+  return roundMetric(
+    (((currentScore?.softPenalty ?? 0) - candidate.softPenalty) * 1.4)
+    + (((currentComponents.proctorWorkload ?? 0) - (candidateComponents.proctorWorkload ?? 0)) * weakWeights.proctorWorkloadBalance)
+    + (((currentComponents.studentDailyLoad ?? 0) - (candidateComponents.studentDailyLoad ?? 0)) * (weakWeights.studentSpacing + weakWeights.preferredSpacing) * 0.7)
+    + (((currentComponents.unusedRoomSeats ?? 0) - (candidateComponents.unusedRoomSeats ?? 0)) * weakWeights.roomUtilization)
+    + (((currentComponents.roomCount ?? 0) - (candidateComponents.roomCount ?? 0)) * 0.7)
+    + (distributionGain * weakWeights.examDistribution),
+  );
+};
+
+const rankCandidatesForCurrentWeakness = ({ candidates, currentScore, draftIndexes, weakWeights }) => {
+  const rankedCandidates = candidates.map((candidate) => ({
+    candidate,
+    estimatedImpact: estimateCandidateMoveImpact({ candidate, currentScore, draftIndexes, weakWeights }),
+  }))
+    .sort((a, b) => b.estimatedImpact - a.estimatedImpact || a.candidate.softPenalty - b.candidate.softPenalty);
+  const viableCandidates = rankedCandidates.filter((entry) => entry.estimatedImpact > -5);
+  return (viableCandidates.length > 0 ? viableCandidates : rankedCandidates.slice(0, 1))
+    .map((entry) => entry.candidate);
+};
+
+const pickBestScoringMove = ({ normalized, baseDraft, originalEvaluation, examId, candidates, currentScore, maxEvaluations, minGain = 0 }) => {
+  let bestCandidateDraft = null;
+  let bestCandidateScore = currentScore;
+  let evaluatedCount = 0;
+
+  for (const candidate of candidates) {
+    if (evaluatedCount >= maxEvaluations) break;
+    evaluatedCount += 1;
+    const candidateDraft = replaceExamAssignments({ draft: baseDraft, examId, candidate });
+    const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, originalEvaluation);
+    if (evaluatedDraft.qualityEvaluation.score >= currentScore + minGain
+      && evaluatedDraft.qualityEvaluation.score > bestCandidateScore) {
+      bestCandidateScore = evaluatedDraft.qualityEvaluation.score;
+      bestCandidateDraft = evaluatedDraft;
+    }
+  }
+
+  return { bestCandidateDraft, bestCandidateScore, evaluatedCount };
+};
+
+const runFocusedRelocationPass = ({
+  normalized,
+  draft,
+  originalEvaluation,
+  sortedRooms,
+  fittingSlotCache,
+  slotDayKeys,
+  focusMetric = null,
+  maxExams = METRIC_REPAIR_EXAM_LIMIT,
+  candidateLimit = METRIC_REPAIR_CANDIDATE_LIMIT,
+  maxEvaluations = 4,
+  minGain = MIN_MEANINGFUL_MOVE_GAIN,
+}) => {
+  let bestDraft = draft;
+  const repairs = [];
+  const weakWeights = getFocusedMetricWeights(bestDraft.qualityEvaluation.metrics, focusMetric);
+  const scoreByExamId = new Map(bestDraft.candidateScores.map((score) => [score.examId, score]));
+  const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
+  const targetedExams = [...normalized.exams]
+    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
+      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
+    .slice(0, maxExams);
+
+  for (const exam of targetedExams) {
+    const currentScore = bestDraft.qualityEvaluation.score;
+    const currentExamScore = scoreByExamId.get(exam.id);
+    const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
+    const candidates = rankCandidatesForCurrentWeakness({
+      candidates: buildValidCandidatesForExam({
+        exam,
+        timeSlots: normalized.timeSlots,
+        sortedRooms,
+        proctors: normalized.proctors,
+        usage,
+        slotDayKeys,
+        strategy: { id: 'local-search-nearby' },
+        fittingSlotCache,
+        proctorsBySlotId: normalized.proctorsBySlotId,
+      }).slice(0, candidateLimit * 4),
+      currentScore: currentExamScore,
+      draftIndexes,
+      weakWeights,
+    });
+
+    const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
+      normalized,
+      baseDraft: bestDraft,
+      originalEvaluation,
+      examId: exam.id,
+      candidates,
+      currentScore,
+      maxEvaluations,
+      minGain,
+    });
+
+    if (bestCandidateDraft !== null) {
+      repairs.push({
+        examId: exam.id,
+        fromScore: currentScore,
+        toScore: bestCandidateScore,
+        improvement: roundMetric(bestCandidateScore - currentScore),
+        focusMetric,
+      });
+      bestDraft = bestCandidateDraft;
+    }
+  }
+
+  return { draft: bestDraft, repairs };
+};
+
+const runRelocationChainEscape = ({ normalized, draft, originalEvaluation, sortedRooms, fittingSlotCache, slotDayKeys }) => {
+  let bestDraft = draft;
+  let bestScore = draft.qualityEvaluation.score;
+  const repairs = [];
+  const weakWeights = getWeakMetricWeights(draft.qualityEvaluation.metrics);
+  const scoreByExamId = new Map(draft.candidateScores.map((score) => [score.examId, score]));
+  const draftIndexes = buildDraftMoveIndexes({ normalized, draft });
+  const targetedExams = [...normalized.exams]
+    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
+      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
+    .slice(0, CHAIN_SEARCH_EXAM_LIMIT);
+
+  for (const firstExam of targetedExams) {
+    const usage = createUsageFromDraft({ normalized, draft, excludedExamId: firstExam.id });
+    const firstCandidates = rankCandidatesForCurrentWeakness({
+      candidates: buildValidCandidatesForExam({
+        exam: firstExam,
+        timeSlots: normalized.timeSlots,
+        sortedRooms,
+        proctors: normalized.proctors,
+        usage,
+        slotDayKeys,
+        strategy: { id: 'local-search-nearby' },
+        fittingSlotCache,
+        proctorsBySlotId: normalized.proctorsBySlotId,
+      }).slice(0, CHAIN_SEARCH_CANDIDATE_LIMIT * 4),
+      currentScore: scoreByExamId.get(firstExam.id),
+      draftIndexes,
+      weakWeights,
+    }).slice(0, 3);
+
+    for (const firstCandidate of firstCandidates) {
+      const firstDraft = withQualityEvaluation(
+        normalized,
+        replaceExamAssignments({ draft, examId: firstExam.id, candidate: firstCandidate }),
+        originalEvaluation,
+      );
+      if (firstDraft.qualityEvaluation.score < draft.qualityEvaluation.score - MAX_NON_GREEDY_SCORE_DROP) continue;
+
+      const secondScoreByExamId = new Map(firstDraft.candidateScores.map((score) => [score.examId, score]));
+      const secondIndexes = buildDraftMoveIndexes({ normalized, draft: firstDraft });
+      const secondExams = targetedExams.filter((exam) => exam.id !== firstExam.id).slice(0, 5);
+
+      for (const secondExam of secondExams) {
+        const secondUsage = createUsageFromDraft({ normalized, draft: firstDraft, excludedExamId: secondExam.id });
+        const secondCandidates = rankCandidatesForCurrentWeakness({
+          candidates: buildValidCandidatesForExam({
+            exam: secondExam,
+            timeSlots: normalized.timeSlots,
+            sortedRooms,
+            proctors: normalized.proctors,
+            usage: secondUsage,
+            slotDayKeys,
+            strategy: { id: 'local-search-nearby' },
+            fittingSlotCache,
+            proctorsBySlotId: normalized.proctorsBySlotId,
+          }).slice(0, CHAIN_SEARCH_CANDIDATE_LIMIT * 4),
+          currentScore: secondScoreByExamId.get(secondExam.id),
+          draftIndexes: secondIndexes,
+          weakWeights,
+        }).slice(0, 2);
+
+        for (const secondCandidate of secondCandidates) {
+          const chainDraft = withQualityEvaluation(
+            normalized,
+            replaceExamAssignments({ draft: firstDraft, examId: secondExam.id, candidate: secondCandidate }),
+            originalEvaluation,
+          );
+          if (chainDraft.qualityEvaluation.score > bestScore) {
+            bestScore = chainDraft.qualityEvaluation.score;
+            bestDraft = chainDraft;
+          }
+        }
+      }
+    }
+  }
+
+  if (bestDraft !== draft && bestScore >= draft.qualityEvaluation.score + MIN_MEANINGFUL_MOVE_GAIN) {
+    repairs.push({
+      examId: 'relocation-chain',
+      fromScore: draft.qualityEvaluation.score,
+      toScore: bestScore,
+      improvement: roundMetric(bestScore - draft.qualityEvaluation.score),
+      focusMetric: 'localOptimaEscape',
+    });
+  }
+
+  return { draft: bestDraft, repairs };
+};
+
+const runThreeExamSwapEscape = ({ normalized, draft, originalEvaluation, sortedRooms, slotDayKeys }) => {
+  let bestDraft = draft;
+  let bestScore = draft.qualityEvaluation.score;
+  const repairs = [];
+  const weakWeights = getWeakMetricWeights(draft.qualityEvaluation.metrics);
+  const scoreByExamId = new Map(draft.candidateScores.map((score) => [score.examId, score]));
+  const { slotById, examSlotId } = buildDraftMoveIndexes({ normalized, draft });
+  const targetedExams = [...normalized.exams]
+    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
+      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
+    .slice(0, THREE_EXAM_SWAP_POOL);
+  let fruitlessTriples = 0;
+
+  for (let i = 0; i < targetedExams.length; i += 1) {
+    for (let j = i + 1; j < targetedExams.length; j += 1) {
+      for (let k = j + 1; k < targetedExams.length; k += 1) {
+        if (fruitlessTriples >= 8) break;
+        const exams = [targetedExams[i], targetedExams[j], targetedExams[k]];
+        const slots = exams.map((exam) => slotById.get(examSlotId.get(exam.id)));
+        if (slots.some((slot) => !slot)) { fruitlessTriples += 1; continue; }
+
+        const directions = [
+          [slots[1], slots[2], slots[0]],
+          [slots[2], slots[0], slots[1]],
+        ];
+        let tripleImproved = false;
+
+        for (const targetSlots of directions) {
+          if (exams.some((exam, index) => !canSlotFitExam(targetSlots[index], exam))) continue;
+          const usage = createUsageFromDraft({
+            normalized,
+            draft,
+            excludedExamIds: new Set(exams.map((exam) => exam.id)),
+          });
+
+          const candidates = exams.map((exam, index) => buildValidCandidatesForExam({
+            exam,
+            timeSlots: [targetSlots[index]],
+            sortedRooms,
+            proctors: normalized.proctors,
+            usage,
+            slotDayKeys,
+            strategy: { id: 'local-search-nearby' },
+            fittingSlotCache: null,
+            proctorsBySlotId: normalized.proctorsBySlotId,
+          })[0]);
+
+          if (candidates.some((candidate) => !candidate)) continue;
+          const swappedDraft = candidates.reduce(
+            (currentDraft, candidate, index) => replaceExamAssignments({ draft: currentDraft, examId: exams[index].id, candidate }),
+            draft,
+          );
+          if (confirmHybridDraft({ draft: swappedDraft, normalized }).length > 0) continue;
+          const evaluatedDraft = withQualityEvaluation(normalized, swappedDraft, originalEvaluation);
+          if (evaluatedDraft.qualityEvaluation.score > bestScore) {
+            bestScore = evaluatedDraft.qualityEvaluation.score;
+            bestDraft = evaluatedDraft;
+            tripleImproved = true;
+          }
+        }
+
+        fruitlessTriples = tripleImproved ? 0 : fruitlessTriples + 1;
+      }
+    }
+  }
+
+  if (bestDraft !== draft && bestScore >= draft.qualityEvaluation.score + MIN_MEANINGFUL_MOVE_GAIN) {
+    repairs.push({
+      examId: 'three-exam-cycle',
+      fromScore: draft.qualityEvaluation.score,
+      toScore: bestScore,
+      improvement: roundMetric(bestScore - draft.qualityEvaluation.score),
+      focusMetric: 'distributionSpacingEscape',
+    });
+  }
+
+  return { draft: bestDraft, repairs };
+};
+
 const optimizeDraftWithLocalSearch = ({ normalized, draft, originalEvaluation }) => {
   if (draft.conflictInserts.length > 0 || draft.scheduledExamIds.length !== normalized.exams.length) {
     return { preview: withQualityEvaluation(normalized, draft, originalEvaluation), repairs: [] };
@@ -1654,44 +2656,365 @@ const optimizeDraftWithLocalSearch = ({ normalized, draft, originalEvaluation })
 
   const slotDayKeys = buildSlotDayKeyMap(normalized.timeSlots);
   const sortedRooms = sortRoomsByCapacityDesc(normalized.rooms);
-  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
-  const mutableExams = [...normalized.exams]
-    .sort((a, b) => (draft.candidateScores.find((score) => score.examId === b.id)?.softPenalty ?? 0)
-      - (draft.candidateScores.find((score) => score.examId === a.id)?.softPenalty ?? 0))
-    .slice(0, LOCAL_SEARCH_EXAM_LIMIT);
+  const fittingSlotCache = buildFittingSlotCache(normalized.exams, normalized.timeSlots, 'local-search-nearby');
 
   let bestDraft = withQualityEvaluation(normalized, draft, originalEvaluation);
+  const localSearchStartScore = bestDraft.qualityEvaluation.score;
   const repairs = [];
 
-  for (const exam of mutableExams) {
-    const currentScore = bestDraft.qualityEvaluation.score;
-    const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
-    const candidates = buildValidCandidatesForExam({
-      exam,
-      timeSlots: normalized.timeSlots,
-      sortedRooms,
-      proctors: normalized.proctors,
-      usage,
-      slotDayKeys,
-      strategy: { id: 'local-search-nearby' },
-    }).slice(0, LOCAL_SEARCH_CANDIDATE_LIMIT);
+  // ── Phase 1: Multi-pass first-improvement relocation ───────────────────────
+  // "First-improvement": evaluate candidates (sorted by soft penalty asc) and
+  // accept the first one that raises global score. Avoids evaluating remaining
+  // candidates once a good move is found — ~3× fewer full evals than best-improvement.
+  // Adaptive early-stop: if a pass improves score by < 0.5 points, gains have plateaued.
+  for (let pass = 0; pass < LOCAL_SEARCH_MAX_PASSES; pass += 1) {
+    let passImproved = false;
+    const passScoreStart = bestDraft.qualityEvaluation.score;
+    const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
+    const scoreByExamId = new Map(bestDraft.candidateScores.map((score) => [score.examId, score]));
+    const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
+    const maxCandidateEvaluations = pass === 0 ? 3 : 4;
+    const candidateLimit = LOCAL_SEARCH_CANDIDATE_LIMIT + (pass > 0 && bestDraft.qualityEvaluation.score < 90 ? 2 : 0);
+    const targetedExams = [...normalized.exams]
+      .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
+        - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }));
 
-    for (const candidate of candidates) {
-      const candidateDraft = replaceExamAssignments({ draft: bestDraft, examId: exam.id, candidate });
-      const hardIssues = confirmHybridDraft({ draft: candidateDraft, normalized });
-      if (hardIssues.length > 0) continue;
+    for (const exam of targetedExams) {
+      const currentScore = bestDraft.qualityEvaluation.score;
+      const currentExamScore = scoreByExamId.get(exam.id);
+      const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
+      // buildValidCandidatesForExam enforces all hard constraints, so confirmHybridDraft is redundant here
+      const candidates = rankCandidatesForCurrentWeakness({
+        candidates: buildValidCandidatesForExam({
+          exam,
+          timeSlots: normalized.timeSlots,
+          sortedRooms,
+          proctors: normalized.proctors,
+          usage,
+          slotDayKeys,
+          strategy: { id: 'local-search-nearby' },
+          fittingSlotCache,
+          proctorsBySlotId: normalized.proctorsBySlotId,
+        }).slice(0, candidateLimit * 4),
+        currentScore: currentExamScore,
+        draftIndexes,
+        weakWeights,
+      });
 
-      const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, originalEvaluation);
-      if (evaluatedDraft.qualityEvaluation.score > bestDraft.qualityEvaluation.score) {
+      const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
+        normalized,
+        baseDraft: bestDraft,
+        originalEvaluation,
+        examId: exam.id,
+        candidates,
+        currentScore,
+        maxEvaluations: maxCandidateEvaluations,
+        minGain: pass === 0 ? 0.25 : MIN_MEANINGFUL_MOVE_GAIN,
+      });
+
+      if (bestCandidateDraft !== null) {
         repairs.push({
           examId: exam.id,
           fromScore: currentScore,
-          toScore: evaluatedDraft.qualityEvaluation.score,
-          improvement: roundMetric(evaluatedDraft.qualityEvaluation.score - currentScore),
+          toScore: bestCandidateScore,
+          improvement: roundMetric(bestCandidateScore - currentScore),
         });
-        bestDraft = evaluatedDraft;
-        break;
+        bestDraft = bestCandidateDraft;
+        passImproved = true;
       }
+    }
+
+    const passGain = bestDraft.qualityEvaluation.score - passScoreStart;
+    if (!passImproved || passGain < 0.5 || bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break;
+  }
+
+  if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 85) {
+    const proctorRepairResult = runProctorRebalancePass({
+      normalized,
+      draft: bestDraft,
+      originalEvaluation,
+    });
+    if (proctorRepairResult.draft !== bestDraft) {
+      bestDraft = proctorRepairResult.draft;
+      repairs.push(...proctorRepairResult.repairs);
+    }
+  }
+
+  for (const focusMetric of getMetricRepairOrder(bestDraft.qualityEvaluation.metrics)) {
+    if (bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break;
+    const repairResult = runFocusedRelocationPass({
+      normalized,
+      draft: bestDraft,
+      originalEvaluation,
+      sortedRooms,
+      fittingSlotCache,
+      slotDayKeys,
+      focusMetric,
+      maxExams: METRIC_REPAIR_EXAM_LIMIT,
+      candidateLimit: METRIC_REPAIR_CANDIDATE_LIMIT,
+      maxEvaluations: 4,
+      minGain: MIN_MEANINGFUL_MOVE_GAIN,
+    });
+    if (repairResult.draft !== bestDraft) {
+      bestDraft = repairResult.draft;
+      repairs.push(...repairResult.repairs);
+    }
+  }
+
+  // ── Phase 2: Exam-pair slot swap ─────────────────────────────────────────────
+  // Tries swapping slots between pairs of high-penalty exams.
+  // Patience counter stops the search after too many consecutive fruitless pairs
+  // to avoid O(n²) exhaustion when most pairs don't help.
+  if (bestDraft.qualityEvaluation.score < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
+    const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
+    const postPhase1Scores = new Map(bestDraft.candidateScores.map((s) => [s.examId, s]));
+    const swapPool = [...normalized.exams]
+      .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: postPhase1Scores.get(b.id), weakWeights })
+        - scoreExamOptimizationPriority({ exam: a, score: postPhase1Scores.get(a.id), weakWeights }))
+      .slice(0, LOCAL_SEARCH_SWAP_EXAM_POOL);
+
+    const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+    const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
+
+    // O(1) slot lookup per exam instead of O(assignments) find() per pair
+    const examCurrentSlotId = new Map();
+    for (const assignment of bestDraft.assignmentInserts) {
+      if (!examCurrentSlotId.has(assignment.examId)) examCurrentSlotId.set(assignment.examId, assignment.timeSlotId);
+    }
+
+    const SWAP_PATIENCE = 10;
+    let consecutiveFruitless = 0;
+
+    outerSwap:
+    for (let i = 0; i < swapPool.length; i += 1) {
+      for (let j = i + 1; j < swapPool.length; j += 1) {
+        if (consecutiveFruitless >= SWAP_PATIENCE) break outerSwap;
+
+        const examA = swapPool[i];
+        const examB = swapPool[j];
+
+        const slotIdA = examCurrentSlotId.get(examA.id);
+        const slotIdB = examCurrentSlotId.get(examB.id);
+        if (!slotIdA || !slotIdB || slotIdA === slotIdB) { consecutiveFruitless += 1; continue; }
+
+        const slotObjA = slotById.get(slotIdA);
+        const slotObjB = slotById.get(slotIdB);
+        if (!slotObjA || !slotObjB) { consecutiveFruitless += 1; continue; }
+
+        if (!canSlotFitExam(slotObjA, examB) || !canSlotFitExam(slotObjB, examA)) { consecutiveFruitless += 1; continue; }
+
+        const usageBase = createUsageFromDraft({
+          normalized,
+          draft: bestDraft,
+          excludedExamIds: new Set([examA.id, examB.id]),
+        });
+
+        const currentExamScoreA = postPhase1Scores.get(examA.id);
+        const currentExamScoreB = postPhase1Scores.get(examB.id);
+        const candidatesA = rankCandidatesForCurrentWeakness({
+          candidates: buildValidCandidatesForExam({
+            exam: examA,
+            timeSlots: [slotObjB],
+            sortedRooms,
+            proctors: normalized.proctors,
+            usage: usageBase,
+            slotDayKeys,
+            strategy: { id: 'local-search-nearby' },
+            fittingSlotCache: null,
+            proctorsBySlotId: normalized.proctorsBySlotId,
+          }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES + 4),
+          currentScore: currentExamScoreA,
+          draftIndexes,
+          weakWeights,
+        }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES);
+
+        const candidatesB = rankCandidatesForCurrentWeakness({
+          candidates: buildValidCandidatesForExam({
+            exam: examB,
+            timeSlots: [slotObjA],
+            sortedRooms,
+            proctors: normalized.proctors,
+            usage: usageBase,
+            slotDayKeys,
+            strategy: { id: 'local-search-nearby' },
+            fittingSlotCache: null,
+            proctorsBySlotId: normalized.proctorsBySlotId,
+          }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES + 4),
+          currentScore: currentExamScoreB,
+          draftIndexes,
+          weakWeights,
+        }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES);
+
+        if (candidatesA.length === 0 || candidatesB.length === 0) { consecutiveFruitless += 1; continue; }
+
+        const currentScore = bestDraft.qualityEvaluation.score;
+        let bestSwapDraft = null;
+        let bestSwapScore = currentScore;
+        let bestSwapCandidates = null;
+        const rankedCombos = candidatesA.flatMap((candidateA) => candidatesB.map((candidateB) => ({
+          candidateA,
+          candidateB,
+          estimatedImpact:
+            estimateCandidateMoveImpact({ candidate: candidateA, currentScore: currentExamScoreA, draftIndexes, weakWeights })
+            + estimateCandidateMoveImpact({ candidate: candidateB, currentScore: currentExamScoreB, draftIndexes, weakWeights }),
+        }))).sort((a, b) => b.estimatedImpact - a.estimatedImpact).slice(0, 4);
+
+        for (const { candidateA, candidateB } of rankedCombos) {
+          const swappedDraft = replaceExamAssignments({
+            draft: replaceExamAssignments({ draft: bestDraft, examId: examA.id, candidate: candidateA }),
+            examId: examB.id,
+            candidate: candidateB,
+          });
+          const evaluatedDraft = withQualityEvaluation(normalized, swappedDraft, originalEvaluation);
+          if (evaluatedDraft.qualityEvaluation.score > bestSwapScore) {
+            bestSwapScore = evaluatedDraft.qualityEvaluation.score;
+            bestSwapDraft = evaluatedDraft;
+            bestSwapCandidates = { candidateA, candidateB };
+          }
+        }
+
+        if (bestSwapDraft !== null) {
+          repairs.push({
+            examId: `${examA.id}↔${examB.id}`,
+            fromScore: currentScore,
+            toScore: bestSwapScore,
+            improvement: roundMetric(bestSwapScore - currentScore),
+          });
+          bestDraft = bestSwapDraft;
+          examCurrentSlotId.set(examA.id, bestSwapCandidates.candidateA.slot.id);
+          examCurrentSlotId.set(examB.id, bestSwapCandidates.candidateB.slot.id);
+          consecutiveFruitless = 0;
+        } else {
+          consecutiveFruitless += 1;
+        }
+        if (bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break outerSwap;
+      }
+    }
+
+    // ── Phase 3: Single post-swap relocation pass ─────────────────────────────
+    // One more first-improvement pass to capitalise on positions unlocked by swaps.
+    if (bestDraft.qualityEvaluation.score < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
+      const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
+      const postSwapScores = new Map(bestDraft.candidateScores.map((s) => [s.examId, s]));
+      const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
+      const phase3Exams = [...normalized.exams]
+        .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: postSwapScores.get(b.id), weakWeights })
+          - scoreExamOptimizationPriority({ exam: a, score: postSwapScores.get(a.id), weakWeights }));
+
+      for (const exam of phase3Exams) {
+        const currentScore = bestDraft.qualityEvaluation.score;
+        const currentExamScore = postSwapScores.get(exam.id);
+        const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
+        const candidates = rankCandidatesForCurrentWeakness({
+          candidates: buildValidCandidatesForExam({
+            exam,
+            timeSlots: normalized.timeSlots,
+            sortedRooms,
+            proctors: normalized.proctors,
+            usage,
+            slotDayKeys,
+            strategy: { id: 'local-search-nearby' },
+            fittingSlotCache,
+            proctorsBySlotId: normalized.proctorsBySlotId,
+          }).slice(0, (LOCAL_SEARCH_CANDIDATE_LIMIT + 2) * 4),
+          currentScore: currentExamScore,
+          draftIndexes,
+          weakWeights,
+        });
+
+        const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
+          normalized,
+          baseDraft: bestDraft,
+          originalEvaluation,
+          examId: exam.id,
+          candidates,
+          currentScore,
+          maxEvaluations: 4,
+          minGain: MIN_MEANINGFUL_MOVE_GAIN,
+        });
+
+        if (bestCandidateDraft !== null) {
+          repairs.push({
+            examId: exam.id,
+            fromScore: currentScore,
+            toScore: bestCandidateScore,
+            improvement: roundMetric(bestCandidateScore - currentScore),
+          });
+          bestDraft = bestCandidateDraft;
+        }
+      }
+    }
+  }
+
+  if (bestDraft.qualityEvaluation.score < 90
+    && (bestDraft.qualityEvaluation.score - localSearchStartScore) < ADAPTIVE_ESCALATION_TARGET_GAIN) {
+    const chainResult = runRelocationChainEscape({
+      normalized,
+      draft: bestDraft,
+      originalEvaluation,
+      sortedRooms,
+      fittingSlotCache,
+      slotDayKeys,
+    });
+    if (chainResult.draft !== bestDraft) {
+      bestDraft = chainResult.draft;
+      repairs.push(...chainResult.repairs);
+    }
+
+    const cycleResult = runThreeExamSwapEscape({
+      normalized,
+      draft: bestDraft,
+      originalEvaluation,
+      sortedRooms,
+      slotDayKeys,
+    });
+    if (cycleResult.draft !== bestDraft) {
+      bestDraft = cycleResult.draft;
+      repairs.push(...cycleResult.repairs);
+    }
+
+    for (const focusMetric of getMetricRepairOrder(bestDraft.qualityEvaluation.metrics).slice(0, 2)) {
+      const repairResult = runFocusedRelocationPass({
+        normalized,
+        draft: bestDraft,
+        originalEvaluation,
+        sortedRooms,
+        fittingSlotCache,
+        slotDayKeys,
+        focusMetric,
+        maxExams: METRIC_REPAIR_EXAM_LIMIT + 4,
+        candidateLimit: METRIC_REPAIR_CANDIDATE_LIMIT + 2,
+        maxEvaluations: 5,
+        minGain: MIN_MEANINGFUL_MOVE_GAIN,
+      });
+      if (repairResult.draft !== bestDraft) {
+        bestDraft = repairResult.draft;
+        repairs.push(...repairResult.repairs);
+      }
+    }
+
+    if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 85) {
+      const proctorRepairResult = runProctorRebalancePass({
+        normalized,
+        draft: bestDraft,
+        originalEvaluation,
+      });
+      if (proctorRepairResult.draft !== bestDraft) {
+        bestDraft = proctorRepairResult.draft;
+        repairs.push(...proctorRepairResult.repairs);
+      }
+    }
+  }
+
+  if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 80) {
+    const proctorRepairResult = runProctorRebalancePass({
+      normalized,
+      draft: bestDraft,
+      originalEvaluation,
+    });
+    if (proctorRepairResult.draft !== bestDraft) {
+      bestDraft = proctorRepairResult.draft;
+      repairs.push(...proctorRepairResult.repairs);
     }
   }
 
@@ -1726,6 +3049,7 @@ const buildConstraintPreview = (normalized) => {
     timeSlots: normalized.timeSlots,
     existingAssignments: normalized.existingAssignments,
     lookups: normalized.lookups,
+    proctorsBySlotId: normalized.proctorsBySlotId,
   });
 };
 
@@ -1749,6 +3073,7 @@ const OPTIMIZATION_STRATEGIES = [
     label: 'Least-constrained local reordering',
     examComparator: compareExamsLeastConstrainedFirst,
     roomSorter: sortRoomsByCapacityDesc,
+    earlyStopOnPerfectCandidate: true,
   },
   {
     id: 'priority-balance',
@@ -1762,6 +3087,7 @@ const OPTIMIZATION_STRATEGIES = [
     label: 'Midpoint slot balance',
     examComparator: compareExamsShortestFirst,
     roomSorter: sortRoomsByCapacityAsc,
+    earlyStopOnPerfectCandidate: true,
   },
 ];
 
@@ -1797,6 +3123,7 @@ const optimizeHybridDraft = (normalized) => {
       existingAssignments: normalized.existingAssignments,
       lookups: normalized.lookups,
       strategy,
+      proctorsBySlotId: normalized.proctorsBySlotId,
     }), originalEvaluation);
 
     const betterPreview = pickBetterConstraintPreview(bestPreview, preview);
@@ -1805,11 +3132,13 @@ const optimizeHybridDraft = (normalized) => {
       bestStrategy = strategy;
     }
 
-    if (preview.conflictInserts.length === 0 && preview.qualityEvaluation?.score === 100) break;
+    if (preview.conflictInserts.length === 0 && (preview.qualityEvaluation?.score ?? 0) >= 92) break;
   }
 
   let localSearchRepairs = [];
-  if (bestPreview.conflictInserts.length === 0 && bestPreview.scheduledExamIds.length === normalized.exams.length) {
+  if (bestPreview.conflictInserts.length === 0
+    && bestPreview.scheduledExamIds.length === normalized.exams.length
+    && (bestPreview.qualityEvaluation?.score ?? 0) < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
     attemptedStrategies.push('Assignment-level local search');
     const localSearch = optimizeDraftWithLocalSearch({
       normalized,
@@ -1818,6 +3147,21 @@ const optimizeHybridDraft = (normalized) => {
     });
     bestPreview = localSearch.preview;
     localSearchRepairs = localSearch.repairs;
+  }
+
+  if (bestPreview.conflictInserts.length === 0
+    && bestPreview.scheduledExamIds.length === normalized.exams.length
+    && (bestPreview.qualityEvaluation?.metrics?.proctorWorkloadBalance ?? 100) < 80) {
+    attemptedStrategies.push('Post-optimization proctor rebalance');
+    const proctorRepair = runProctorRebalancePass({
+      normalized,
+      draft: bestPreview,
+      originalEvaluation,
+    });
+    if (proctorRepair.draft !== bestPreview) {
+      bestPreview = proctorRepair.draft;
+      localSearchRepairs = [...localSearchRepairs, ...proctorRepair.repairs];
+    }
   }
 
   const beforeScore = originalEvaluation.score;
@@ -1902,10 +3246,6 @@ const confirmHybridDraft = ({ draft, normalized }) => {
 
     if (room.status !== 'AVAILABLE') {
       issues.push('A selected room is not available.');
-    }
-
-    if (room.centerId !== proctor.centerId) {
-      issues.push('A selected proctor is assigned outside the room center.');
     }
 
     if (!proctor.availableTimeSlotIds?.has(slot.id)) {
@@ -2005,7 +3345,7 @@ const buildBlockingIssuesFromConflicts = (conflictInserts = []) => {
 
 const dedupeIssues = (issues = []) => [...new Set(issues.filter(Boolean))];
 
-const collectPreValidationState = async ({ normalized, semester, constraintPreview = null, includeConstraintPreview = true }) => {
+const collectPreValidationState = async ({ normalized, semester, constraintPreview = null, includeConstraintPreview = true, cachedStudentUserMap = null }) => {
   const groups = {
     rooms: [],
     proctors: [],
@@ -2064,16 +3404,16 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
       );
     }
 
-    const maxSlotCapacity = Math.max(0, ...normalized.lookups.timeslotCapacityMap.values());
+    const maxSlotCapacity = normalized.lookups.totalAvailableRoomCapacity ?? 0;
     if (maxSlotCapacity < exam.requiredSeats) {
       groups.courseOfferings.push(`${examLabel} requires ${exam.requiredSeats} seats, but available room capacity supports at most ${maxSlotCapacity} seats in a time slot.`);
     }
 
     const requiredProctors = getRequiredProctorsForExam(exam);
+    // Use pre-indexed reverse map instead of O(slots × proctors) scan.
     const maxProctorCoverage = normalized.timeSlots.reduce((max, slot) => {
       if (!canSlotFitExam(slot, exam)) return max;
-      const availableCount = normalized.proctors.filter((proctor) => proctor.availableTimeSlotIds?.has(slot.id)).length;
-      return Math.max(max, availableCount);
+      return Math.max(max, normalized.proctorsBySlotId.get(slot.id)?.length ?? 0);
     }, 0);
     if (maxProctorCoverage < requiredProctors) {
       groups.proctors.push(`${examLabel} needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''}, but the strongest valid time slot has only ${maxProctorCoverage} available proctor${maxProctorCoverage !== 1 ? 's' : ''}.`);
@@ -2088,13 +3428,20 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
   }
 
   const allStudentIds = [...normalized.studentToExams.keys()];
-  const studentUserMap = new Map();
-  if (allStudentIds.length > 0) {
-    const students = await prisma.student.findMany({
-      where: { id: { in: allStudentIds } },
-      select: { id: true, user: { select: { name: true, email: true } } },
-    });
-    for (const student of students) studentUserMap.set(student.id, student.user);
+  // Reuse student data if caller already fetched it (avoids a redundant DB round-trip
+  // when collectPreValidationState is called twice in the same request).
+  let studentUserMap;
+  if (cachedStudentUserMap !== null) {
+    studentUserMap = cachedStudentUserMap;
+  } else {
+    studentUserMap = new Map();
+    if (allStudentIds.length > 0) {
+      const students = await prisma.student.findMany({
+        where: { id: { in: allStudentIds } },
+        select: { id: true, user: { select: { name: true, email: true } } },
+      });
+      for (const student of students) studentUserMap.set(student.id, student.user);
+    }
   }
 
   for (const [studentId, examIds] of normalized.studentToExams.entries()) {
@@ -2140,6 +3487,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
     groups,
     warnings: dedupeIssues(warnings),
     constraintPreview: preview,
+    studentUserMap,
   };
 };
 
@@ -2317,10 +3665,14 @@ export const optimizeScheduling = async (data) => {
   }
 
   const optimizationAttempt = optimizeHybridDraft(normalized);
+  // Cache the result so generateSchedule can reuse it without re-running the
+  // full optimization pass (which is the dominant cost of "Final Generation").
+  _cacheSet(_optimizationCache, data.semesterId, optimizationAttempt, OPTIMIZATION_CACHE_TTL_MS);
   const nextState = await collectPreValidationState({
     normalized,
     semester,
     constraintPreview: optimizationAttempt.preview,
+    cachedStudentUserMap: baseState.studentUserMap,
   });
 
   return buildValidationResponse({
@@ -2352,6 +3704,8 @@ export const optimizeScheduling = async (data) => {
 
 export const generateSchedule = async (data) => {
   const { semesterId, scheduleName } = data;
+  const normalizedScheduleName = await assertScheduleNameAvailable(prisma, scheduleName);
+
   const { normalized, semester } = await fetchSchedulingData(semesterId);
 
   if (
@@ -2380,11 +3734,14 @@ export const generateSchedule = async (data) => {
     throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
 
-  const optimizationAttempt = optimizeHybridDraft(normalized);
+  const optimizationAttempt = _cacheGet(_optimizationCache, semesterId) ?? optimizeHybridDraft(normalized);
+  // Consume the cache entry — each generate call gets exactly one use.
+  _cacheDel(_optimizationCache, semesterId);
   const { groups, constraintPreview } = await collectPreValidationState({
     normalized,
     semester,
     constraintPreview: optimizationAttempt.preview,
+    cachedStudentUserMap: requiredDataState.studentUserMap,
   });
   const blockingIssueCount = [
     ...groups.rooms,
@@ -2414,7 +3771,11 @@ export const generateSchedule = async (data) => {
     throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
 
-  const result = await prisma.$transaction(async (tx) => {
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+    await assertScheduleNameAvailable(tx, normalizedScheduleName);
+
     const draftExamIdToPersistedId = new Map(
       normalized.exams
         .filter((exam) => exam.persistedExamId)
@@ -2434,7 +3795,7 @@ export const generateSchedule = async (data) => {
 
     const schedule = await tx.schedule.create({
       data: {
-        name: scheduleName,
+        name: normalizedScheduleName,
         isFinal: false,
         algorithmType: HYBRID_ALGORITHM_TYPE,
         generationStage: GENERATION_STAGE.GENERATED,
@@ -2494,16 +3855,23 @@ export const generateSchedule = async (data) => {
       assignmentInserts,
       scheduledExamIds,
     };
-  });
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: 30000,
+      maxWait: 10000,
+    });
+  } catch (error) {
+    await remapScheduleNameConflict(prisma, normalizedScheduleName, error);
+  }
 
   const { fullSchedule, assignmentInserts } = result;
 
   return {
     scheduleId: fullSchedule.id,
-    scheduleName,
+    scheduleName: normalizedScheduleName,
     schedule: fullSchedule,
     assignmentsCount: assignmentInserts.length,
-    message: 'Schedule generated successfully by the hybrid constraint-based engine with all hard constraints satisfied.',
+    message: 'Draft schedule generated successfully by the hybrid constraint-based engine with all internal hard constraints satisfied.',
     algorithm: {
       type: HYBRID_ALGORITHM_TYPE,
       pipeline: PIPELINE_STAGES,
@@ -2519,8 +3887,8 @@ export const generateSchedule = async (data) => {
   };
 };
 
-export const getScheduleAnalysis = async (scheduleId) => {
-  const schedule = await prisma.schedule.findUnique({
+export const getScheduleAnalysis = async (scheduleId, client = prisma) => {
+  const schedule = await client.schedule.findUnique({
     where: { id: scheduleId },
     include: {
       assignments: {
@@ -2552,10 +3920,42 @@ export const getScheduleAnalysis = async (scheduleId) => {
   const proctorCollisions = [];
   const studentOverlaps = [];
   const roomSlotCount = new Map();
+  const roomTimeRangeMap = new Map();
   const proctorSlotExamIds = new Map();
+  const proctorTimeRangeMap = new Map();
   const proctorDayExamIds = new Map();
   const proctorDailyLoadViolations = [];
   const examSlotCapacity = new Map();
+  const studentTimeRangeMap = new Map();
+  const studentReservationKeys = new Set();
+  const analysisSeen = new Set();
+
+  const pushUnique = (list, key, value) => {
+    if (analysisSeen.has(key)) return;
+    analysisSeen.add(key);
+    list.push(value);
+  };
+
+  const findRangeOverlap = (rangeMap, entityId, slot, examId) => {
+    if (!slot?.startTime || !slot?.endTime) return null;
+    return (rangeMap.get(entityId) ?? []).find((range) => (
+      range.examId !== examId && timeRangesOverlap(slot.startTime, slot.endTime, range.start, range.end)
+    )) ?? null;
+  };
+
+  const rememberRange = (rangeMap, entityId, assignment) => {
+    const slot = assignment.timeSlot;
+    if (!slot?.startTime || !slot?.endTime) return;
+    const ranges = rangeMap.get(entityId) ?? [];
+    ranges.push({
+      start: slot.startTime,
+      end: slot.endTime,
+      examId: assignment.examId,
+      assignmentId: assignment.id,
+      timeSlotId: assignment.timeSlotId,
+    });
+    rangeMap.set(entityId, ranges);
+  };
 
   // Build a map of proctors for quick lookup
   const proctorMap = new Map();
@@ -2586,11 +3986,39 @@ export const getScheduleAnalysis = async (scheduleId) => {
     const roomSlotGroup = roomSlotCount.get(roomSlotKey) ?? new Set();
     roomSlotGroup.add(assignment.examId);
     roomSlotCount.set(roomSlotKey, roomSlotGroup);
+    const roomOverlap = findRangeOverlap(roomTimeRangeMap, assignment.roomId, assignment.timeSlot, assignment.examId);
+    if (roomOverlap) {
+      pushUnique(
+        roomReuseViolations,
+        `room-range:${assignment.roomId}:${assignment.id}:${roomOverlap.assignmentId}`,
+        {
+          roomId: assignment.roomId,
+          timeSlotId: assignment.timeSlotId,
+          assignmentIds: [roomOverlap.assignmentId, assignment.id],
+          examIds: [roomOverlap.examId, assignment.examId],
+        },
+      );
+    }
+    rememberRange(roomTimeRangeMap, assignment.roomId, assignment);
 
     const proctorSlotKey = `${assignment.proctorId}:${assignment.timeSlotId}`;
     const proctorSlotGroup = proctorSlotExamIds.get(proctorSlotKey) ?? new Set();
     proctorSlotGroup.add(assignment.examId);
     proctorSlotExamIds.set(proctorSlotKey, proctorSlotGroup);
+    const proctorOverlap = findRangeOverlap(proctorTimeRangeMap, assignment.proctorId, assignment.timeSlot, assignment.examId);
+    if (proctorOverlap) {
+      pushUnique(
+        proctorCollisions,
+        `proctor-range:${assignment.proctorId}:${assignment.id}:${proctorOverlap.assignmentId}`,
+        {
+          proctorId: assignment.proctorId,
+          timeSlotId: assignment.timeSlotId,
+          assignmentIds: [proctorOverlap.assignmentId, assignment.id],
+          examIds: [proctorOverlap.examId, assignment.examId],
+        },
+      );
+    }
+    rememberRange(proctorTimeRangeMap, assignment.proctorId, assignment);
 
     const proctorDayKey = `${assignment.proctorId}:${toDateKey(assignment.timeSlot.date ?? assignment.timeSlot.startTime)}`;
     const proctorDayGroup = proctorDayExamIds.get(proctorDayKey) ?? new Set();
@@ -2598,25 +4026,52 @@ export const getScheduleAnalysis = async (scheduleId) => {
     proctorDayExamIds.set(proctorDayKey, proctorDayGroup);
 
     const studentIds = getUniqueStudentIdsForExam(assignment.exam);
+    const studentReservationKey = `${assignment.examId}:${assignment.timeSlotId}`;
+    const shouldCheckStudents = !studentReservationKeys.has(studentReservationKey);
+    studentReservationKeys.add(studentReservationKey);
+    if (!shouldCheckStudents) continue;
+
     for (const studentId of studentIds) {
       const key = `${studentId}:${assignment.timeSlotId}`;
       const seen = studentSlotSeen.get(key);
       if (seen && seen.examId !== assignment.examId) {
-        studentOverlaps.push({
-          studentId,
-          timeSlotId: assignment.timeSlotId,
-          assignmentIds: [seen.assignmentId, assignment.id],
-        });
+        pushUnique(
+          studentOverlaps,
+          `student-slot:${studentId}:${seen.assignmentId}:${assignment.id}`,
+          {
+            studentId,
+            timeSlotId: assignment.timeSlotId,
+            assignmentIds: [seen.assignmentId, assignment.id],
+          },
+        );
       } else if (!seen) {
         studentSlotSeen.set(key, { assignmentId: assignment.id, examId: assignment.examId });
       }
+
+      const studentOverlap = findRangeOverlap(studentTimeRangeMap, studentId, assignment.timeSlot, assignment.examId);
+      if (studentOverlap) {
+        pushUnique(
+          studentOverlaps,
+          `student-range:${studentId}:${studentOverlap.assignmentId}:${assignment.id}`,
+          {
+            studentId,
+            timeSlotId: assignment.timeSlotId,
+            assignmentIds: [studentOverlap.assignmentId, assignment.id],
+          },
+        );
+      }
+      rememberRange(studentTimeRangeMap, studentId, assignment);
     }
   }
 
   for (const [key, examIds] of roomSlotCount.entries()) {
     if (examIds.size > 1) {
       const [roomId, timeSlotId] = key.split(':');
-      roomReuseViolations.push({ roomId, timeSlotId, count: examIds.size, examIds: [...examIds] });
+      pushUnique(
+        roomReuseViolations,
+        `room-slot:${roomId}:${timeSlotId}`,
+        { roomId, timeSlotId, count: examIds.size, examIds: [...examIds] },
+      );
     }
   }
 
@@ -2632,7 +4087,11 @@ export const getScheduleAnalysis = async (scheduleId) => {
   for (const [key, examIds] of proctorSlotExamIds.entries()) {
     if (examIds.size > 1) {
       const [proctorId, timeSlotId] = key.split(':');
-      proctorCollisions.push({ proctorId, timeSlotId, count: examIds.size, examIds: [...examIds] });
+      pushUnique(
+        proctorCollisions,
+        `proctor-slot:${proctorId}:${timeSlotId}`,
+        { proctorId, timeSlotId, count: examIds.size, examIds: [...examIds] },
+      );
     }
   }
 
@@ -2863,15 +4322,55 @@ export const publishSchedule = async (scheduleId, payload = {}) => {
     throw new AppError('Cannot publish schedule because it conflicts with an existing published schedule.', 400);
   }
 
-  const schedule = await prisma.schedule.update({
-    where: { id: scheduleId },
-    data: { isFinal: true, examPeriod },
-  });
+  // Publish lifecycle:
+  //   - draft -> publish  : SCHEDULE_PUBLISHED (publishedVersion 0 -> 1)
+  //   - draft -> publish (after a prior unpublish) : SCHEDULE_REPUBLISHED (n -> n+1)
+  //   - already published : no-op, no notification
+  if (existing.isFinal) {
+    return { message: 'Schedule is already published', schedule: existing };
+  }
 
-  const notificationType = existing.isFinal
-    ? NOTIFICATION_TYPES.SCHEDULE_UPDATED
-    : NOTIFICATION_TYPES.SCHEDULE_PUBLISHED;
-  await createSchedulePublicationNotifications({ scheduleId, notificationType });
+  const previousVersion = existing.publishedVersion ?? 0;
+  const newVersion = previousVersion + 1;
+  const eventType = previousVersion === 0
+    ? NOTIFICATION_TYPES.SCHEDULE_PUBLISHED
+    : NOTIFICATION_TYPES.SCHEDULE_REPUBLISHED;
 
-  return { message: 'Schedule published successfully', schedule };
+  // Run the schedule update and notification fan-out in a single transaction so
+  // a partial failure cannot leave the schedule published without notifications
+  // (or vice-versa). The DB-level unique constraint plus skipDuplicates makes
+  // any retried publish for the same (scheduleId, version) safely idempotent.
+  const { schedule, notificationResult } = await prisma.$transaction(
+    async (tx) => {
+      const updated = await tx.schedule.update({
+        where: { id: scheduleId },
+        data: {
+          isFinal: true,
+          examPeriod,
+          publishedVersion: newVersion,
+          lastPublishedAt: new Date(),
+        },
+      });
+
+      const result = await createSchedulePublicationNotifications({
+        scheduleId,
+        eventType,
+        scheduleVersion: newVersion,
+        client: tx,
+      });
+
+      return { schedule: updated, notificationResult: result };
+    },
+    { timeout: 30000, maxWait: 10000 },
+  );
+
+  return {
+    message: eventType === NOTIFICATION_TYPES.SCHEDULE_REPUBLISHED
+      ? 'Schedule republished successfully'
+      : 'Schedule published successfully',
+    schedule,
+    eventType,
+    scheduleVersion: newVersion,
+    notificationResult,
+  };
 };

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getRoomSchema = uuidParamSchema;
 
@@ -25,11 +25,9 @@ export const updateRoomSchema = z.object({
 });
 
 export const getRoomsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
     centerId: z.string().uuid().optional(),
     minCapacity: z.coerce.number().int().positive().optional(),
-  }).catchall(z.any())
+    status: z.enum(['AVAILABLE', 'MAINTENANCE']).optional(),
+  }).catchall(z.any()),
 });

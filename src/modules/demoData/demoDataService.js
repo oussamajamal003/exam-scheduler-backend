@@ -1,5 +1,6 @@
 import bcrypt from 'bcrypt';
 import prisma from '../../config/prisma.js';
+import { AppError } from '../../utils/AppError.js';
 
 const DEMO_PREFIX = 'DEMO-';
 const DEMO_PASSWORD = 'Demo12345!';
@@ -232,6 +233,75 @@ const buildCreatedBy = (datasetKey) => `demo-data:${datasetKey}`;
 const buildStudentEmail = (datasetKey, index) => `demo.${datasetKey.toLowerCase()}.student${String(index + 1).padStart(4, '0')}@st.uni.edu`;
 const buildProctorEmail = (datasetKey, index) => `demo.${datasetKey.toLowerCase()}.proctor${String(index + 1).padStart(3, '0')}@uni.edu`;
 const buildStudentUniversityId = (namespace, index) => `${namespace}-STU-${String(index + 1).padStart(4, '0')}`;
+const buildDatasetScopedLabel = (value, profile) => `${value} (${profile.label})`;
+const allDemoSemesterNames = Object.values(datasetProfiles).map((profile) => profile.semesterName);
+
+const buildDatasetSemesterWhere = (profile) => ({
+  OR: [
+    { createdBy: buildCreatedBy(profile.key) },
+    { name: profile.semesterName },
+  ],
+});
+
+const chooseCanonicalDatasetSemester = (current, candidate) => {
+  if (!current) return candidate;
+
+  const currentOfferings = current._count?.courseOfferings ?? 0;
+  const candidateOfferings = candidate._count?.courseOfferings ?? 0;
+  if (candidateOfferings !== currentOfferings) return candidateOfferings > currentOfferings ? candidate : current;
+
+  const currentCourses = current._count?.courses ?? 0;
+  const candidateCourses = candidate._count?.courses ?? 0;
+  if (candidateCourses !== currentCourses) return candidateCourses > currentCourses ? candidate : current;
+
+  const currentCreatedAt = current.createdAt instanceof Date ? current.createdAt.getTime() : 0;
+  const candidateCreatedAt = candidate.createdAt instanceof Date ? candidate.createdAt.getTime() : 0;
+  return candidateCreatedAt < currentCreatedAt ? candidate : current;
+};
+
+const normalizeDatasetSemesterRowsWithTx = async (tx, profile) => {
+  const createdBy = buildCreatedBy(profile.key);
+  const semesters = await tx.semester.findMany({
+    where: buildDatasetSemesterWhere(profile),
+    include: {
+      _count: {
+        select: {
+          courseOfferings: true,
+          courses: true,
+        },
+      },
+    },
+    orderBy: [{ createdAt: 'asc' }],
+  });
+
+  if (semesters.length === 0) return null;
+
+  const canonical = semesters.reduce(chooseCanonicalDatasetSemester, null);
+  const duplicateIds = semesters
+    .filter((semester) => semester.id !== canonical.id)
+    .filter((semester) => (semester._count?.courseOfferings ?? 0) === 0 && (semester._count?.courses ?? 0) === 0)
+    .map((semester) => semester.id);
+
+  if (duplicateIds.length > 0) {
+    await tx.semester.deleteMany({ where: { id: { in: duplicateIds } } });
+  }
+
+  return tx.semester.update({
+    where: { id: canonical.id },
+    data: {
+      name: profile.semesterName,
+      startDate: toDate(profile.semesterStartDate, '00:00'),
+      endDate: toDate(profile.semesterEndDate, '23:59'),
+      academicYear: profile.academicYear,
+      createdBy,
+    },
+  });
+};
+
+const normalizeDatasetSemesterRows = async (profile) => prisma.$transaction(
+  async (tx) => normalizeDatasetSemesterRowsWithTx(tx, profile),
+  { timeout: 120000 },
+);
 
 const normalizeDatasetKey = (input) => {
   if (typeof input === 'string' && datasetProfiles[input]) return input;
@@ -244,6 +314,18 @@ const normalizeDatasetKey = (input) => {
 };
 
 const getProfile = (datasetKey) => datasetProfiles[normalizeDatasetKey(datasetKey)];
+
+export const getDemoDatasetKeyForSemester = (semester) => {
+  if (!semester) return null;
+
+  if (typeof semester.createdBy === 'string' && semester.createdBy.startsWith('demo-data:')) {
+    const datasetKey = semester.createdBy.slice('demo-data:'.length).toUpperCase();
+    return datasetProfiles[datasetKey] ? datasetKey : null;
+  }
+
+  const matchedProfile = Object.values(datasetProfiles).find((profile) => profile.semesterName === semester.name);
+  return matchedProfile?.key ?? null;
+};
 
 const buildDepartmentSpecs = (profile) => {
   const templates = profile.realData ? realDepartmentTemplates : departmentTemplates;
@@ -317,7 +399,7 @@ const buildCenterSpecs = (profile) => {
   }
   return Array.from({ length: profile.centerCount }, (_, index) => ({
     code: `${profile.namespace}-CENTER-${String(index + 1).padStart(2, '0')}`,
-    name: `${centerNamePool[index]} (${profile.label})`,
+    name: centerNamePool[index],
     location: `Campus ${index + 1} - ${profile.label}`,
   }));
 };
@@ -340,7 +422,7 @@ const buildRoomPlans = (profile, centers) => {
     for (let localIndex = 0; localIndex < countForCenter; localIndex += 1) {
       roomPlans.push({
         centerCode: center.code,
-        name: `${roomNamePool[roomIndex % roomNamePool.length]} ${String(localIndex + 1).padStart(2, '0')}`,
+        name: `${roomNamePool[roomIndex % roomNamePool.length]} ${String(roomIndex + 1).padStart(2, '0')}`,
         capacity: roomCapacityPool[roomIndex % roomCapacityPool.length],
       });
       roomIndex += 1;
@@ -409,7 +491,7 @@ const countDemoData = async (datasetKey) => {
   const [departmentsCount, programsCount, semestersCount, coursesCount, courseOfferingsCount, examsCount, centersCount, roomsCount, proctorsCount, studentsCount, timeSlotsCount, registrationsCount, schedulesCount] = await Promise.all([
     prisma.department.count({ where: scope ? { code: { startsWith: scope.departmentCodePrefix } } : { code: { startsWith: DEMO_PREFIX } } }),
     prisma.program.count({ where: scope ? { code: { startsWith: scope.programCodePrefix } } : { code: { startsWith: DEMO_PREFIX } } }),
-    prisma.semester.count({ where: scope ? { createdBy: scope.createdBy } : { createdBy: { startsWith: 'demo-data:' } } }),
+    prisma.semester.count({ where: scope ? buildDatasetSemesterWhere(scope.profile) : { OR: [{ createdBy: { startsWith: 'demo-data:' } }, { name: { in: allDemoSemesterNames } }] } }),
     prisma.course.count({ where: scope ? { code: { startsWith: scope.namespace } } : { code: { startsWith: DEMO_PREFIX } } }),
     prisma.courseOffering.count({ where: scope ? { course: { code: { startsWith: scope.namespace } } } : { course: { code: { startsWith: DEMO_PREFIX } } } }),
     prisma.exam.count({ where: scope ? { courseOffering: { course: { code: { startsWith: scope.namespace } } } } : { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } } }),
@@ -439,22 +521,59 @@ const countDemoData = async (datasetKey) => {
   };
 };
 
+const deleteScopedAssignmentsWithTx = async (tx, { scheduleWhere, examWhere, roomWhere, proctorWhere, timeSlotWhere }) => {
+  const [scheduleRows, examRows, roomRows, proctorRows, timeSlotRows] = await Promise.all([
+    tx.schedule.findMany({ where: scheduleWhere, select: { id: true } }),
+    tx.exam.findMany({ where: examWhere, select: { id: true } }),
+    tx.room.findMany({ where: roomWhere, select: { id: true } }),
+    tx.proctor.findMany({ where: proctorWhere, select: { id: true } }),
+    tx.timeSlot.findMany({ where: timeSlotWhere, select: { id: true } }),
+  ]);
+
+  const scheduleIds = scheduleRows.map((row) => row.id);
+  const examIds = examRows.map((row) => row.id);
+  const roomIds = roomRows.map((row) => row.id);
+  const proctorIds = proctorRows.map((row) => row.id);
+  const timeSlotIds = timeSlotRows.map((row) => row.id);
+
+  const assignmentScope = [
+    scheduleIds.length > 0 ? { scheduleId: { in: scheduleIds } } : null,
+    examIds.length > 0 ? { examId: { in: examIds } } : null,
+    roomIds.length > 0 ? { roomId: { in: roomIds } } : null,
+    proctorIds.length > 0 ? { proctorId: { in: proctorIds } } : null,
+    timeSlotIds.length > 0 ? { timeSlotId: { in: timeSlotIds } } : null,
+  ].filter(Boolean);
+
+  let assignmentScheduleIds = [];
+
+  if (assignmentScope.length > 0) {
+    const assignmentRows = await tx.examAssignment.findMany({
+      where: { OR: assignmentScope },
+      select: { scheduleId: true },
+    });
+    assignmentScheduleIds = assignmentRows.map((row) => row.scheduleId);
+    await tx.examAssignment.deleteMany({ where: { OR: assignmentScope } });
+  }
+
+  const scheduleIdsToDelete = [...new Set([...scheduleIds, ...assignmentScheduleIds])];
+
+  if (scheduleIdsToDelete.length > 0) {
+    await tx.schedule.deleteMany({ where: { id: { in: scheduleIdsToDelete } } });
+  }
+
+  return { roomIds };
+};
+
 const clearDemoDatasetWithTx = async (tx, datasetKey) => {
   const scope = buildDatasetScope(datasetKey);
 
-  const demoSchedules = await tx.schedule.findMany({
-    where: {
-      OR: [
-        { createdBy: scope.createdBy },
-        { assignments: { some: { exam: { courseOffering: { course: { code: { startsWith: scope.namespace } } } } } } },
-      ],
-    },
-    select: { id: true },
+  await deleteScopedAssignmentsWithTx(tx, {
+    scheduleWhere: { createdBy: scope.createdBy },
+    examWhere: { courseOffering: { course: { code: { startsWith: scope.namespace } } } },
+    roomWhere: { center: { code: { startsWith: scope.centerCodePrefix } } },
+    proctorWhere: { user: { email: { startsWith: scope.proctorEmailPrefix } } },
+    timeSlotWhere: { createdBy: scope.createdBy },
   });
-
-  if (demoSchedules.length > 0) {
-    await tx.schedule.deleteMany({ where: { id: { in: demoSchedules.map((schedule) => schedule.id) } } });
-  }
 
   await tx.registration.deleteMany({ where: { courseOffering: { course: { code: { startsWith: scope.namespace } } } } });
   await tx.exam.deleteMany({ where: { courseOffering: { course: { code: { startsWith: scope.namespace } } } } });
@@ -468,8 +587,9 @@ const clearDemoDatasetWithTx = async (tx, datasetKey) => {
   });
   const demoCenterIds = demoCenterRows.map((center) => center.id);
 
+  await tx.proctor.deleteMany({ where: { user: { email: { startsWith: scope.proctorEmailPrefix } } } });
+
   if (demoCenterIds.length > 0) {
-    await tx.proctor.deleteMany({ where: { centerId: { in: demoCenterIds } } });
     await tx.room.deleteMany({ where: { centerId: { in: demoCenterIds } } });
     await tx.center.deleteMany({ where: { id: { in: demoCenterIds } } });
   }
@@ -477,24 +597,20 @@ const clearDemoDatasetWithTx = async (tx, datasetKey) => {
   await tx.user.deleteMany({ where: { OR: [{ email: { startsWith: scope.proctorEmailPrefix } }, { email: { startsWith: scope.studentEmailPrefix } }] } });
   await tx.program.deleteMany({ where: { code: { startsWith: scope.programCodePrefix } } });
   await tx.department.deleteMany({ where: { code: { startsWith: scope.departmentCodePrefix } } });
-  await tx.semester.deleteMany({ where: { createdBy: scope.createdBy } });
+  await tx.semester.deleteMany({ where: buildDatasetSemesterWhere(scope.profile) });
   await tx.timeSlot.deleteMany({ where: { createdBy: scope.createdBy } });
 };
 
-const clearLegacyDemoDataWithTx = async (tx) => {
-  const legacySchedules = await tx.schedule.findMany({
-    where: {
-      OR: [
-        { createdBy: 'demo-data' },
-        { assignments: { some: { exam: { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } } } } },
-      ],
-    },
-    select: { id: true },
-  });
+export const clearDemoDatasetByKeyWithTx = clearDemoDatasetWithTx;
 
-  if (legacySchedules.length > 0) {
-    await tx.schedule.deleteMany({ where: { id: { in: legacySchedules.map((schedule) => schedule.id) } } });
-  }
+const clearLegacyDemoDataWithTx = async (tx) => {
+  await deleteScopedAssignmentsWithTx(tx, {
+    scheduleWhere: { createdBy: 'demo-data' },
+    examWhere: { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } },
+    roomWhere: { center: { code: { startsWith: DEMO_PREFIX } } },
+    proctorWhere: { user: { email: { startsWith: 'demo.proctor' } } },
+    timeSlotWhere: { createdBy: 'demo-data' },
+  });
 
   await tx.registration.deleteMany({ where: { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } } });
   await tx.exam.deleteMany({ where: { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } } });
@@ -508,8 +624,9 @@ const clearLegacyDemoDataWithTx = async (tx) => {
   });
   const legacyCenterIds = legacyCenters.map((center) => center.id);
 
+  await tx.proctor.deleteMany({ where: { user: { email: { startsWith: 'demo.proctor' } } } });
+
   if (legacyCenterIds.length > 0) {
-    await tx.proctor.deleteMany({ where: { centerId: { in: legacyCenterIds } } });
     await tx.room.deleteMany({ where: { centerId: { in: legacyCenterIds } } });
     await tx.center.deleteMany({ where: { id: { in: legacyCenterIds } } });
   }
@@ -557,15 +674,20 @@ const createPrograms = async (tx, profile, departmentByCode) => {
   return map;
 };
 
-const createSemester = async (tx, profile) => tx.semester.create({
-  data: {
-    name: profile.semesterName,
-    startDate: toDate(profile.semesterStartDate, '00:00'),
-    endDate: toDate(profile.semesterEndDate, '23:59'),
-    academicYear: profile.academicYear,
-    createdBy: buildCreatedBy(profile.key),
-  },
-});
+const createSemester = async (tx, profile) => {
+  const existing = await normalizeDatasetSemesterRowsWithTx(tx, profile);
+  if (existing) return existing;
+
+  return tx.semester.create({
+    data: {
+      name: profile.semesterName,
+      startDate: toDate(profile.semesterStartDate, '00:00'),
+      endDate: toDate(profile.semesterEndDate, '23:59'),
+      academicYear: profile.academicYear,
+      createdBy: buildCreatedBy(profile.key),
+    },
+  });
+};
 
 const createCourses = async (tx, profile, programByCode, semester, offeringPlans) => {
   const map = new Map();
@@ -575,7 +697,7 @@ const createCourses = async (tx, profile, programByCode, semester, offeringPlans
     const row = await tx.course.create({
       data: {
         code: courseKey,
-        title: plan.title,
+        title: buildDatasetScopedLabel(plan.title, profile),
         programId: programByCode.get(plan.programCode).id,
         semesterId: semester.id,
         credits: plan.credits ?? 3,
@@ -628,7 +750,7 @@ const createCentersAndRooms = async (tx, profile) => {
   for (const [index, centerPlan] of centerSpecs.entries()) {
     const center = await tx.center.create({
       data: {
-        name: centerPlan.name,
+        name: buildDatasetScopedLabel(centerPlan.name, profile),
         code: centerPlan.code,
         location: centerPlan.location,
         description: `${profile.label} exam center for demo scheduling.`,
@@ -644,7 +766,7 @@ const createCentersAndRooms = async (tx, profile) => {
     await tx.room.create({
       data: {
         centerId: centerByCode.get(roomPlan.centerCode).id,
-        name: roomPlan.name,
+        name: buildDatasetScopedLabel(roomPlan.name, profile),
         capacity: roomPlan.capacity,
         status: 'AVAILABLE',
         createdBy: buildCreatedBy(profile.key),
@@ -700,10 +822,7 @@ const createTimeSlots = async (tx, profile) => {
 };
 
 const createProctors = async (tx, profile, centerByCode, passwordHash, timeSlots) => {
-  const centerCodes = [...centerByCode.keys()];
-
   for (let index = 0; index < profile.proctorCount; index += 1) {
-    const centerCode = centerCodes[index % centerCodes.length];
     const user = await upsertUser(tx, {
       name: `Proctor ${fullName(index)}`,
       email: buildProctorEmail(profile.key, index),
@@ -713,7 +832,6 @@ const createProctors = async (tx, profile, centerByCode, passwordHash, timeSlots
     const proctor = await tx.proctor.create({
       data: {
         userId: user.id,
-        centerId: centerByCode.get(centerCode).id,
         department: index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
         maxExamsPerDay: index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
         createdBy: buildCreatedBy(profile.key),
@@ -780,11 +898,261 @@ const getExpectedTestCases = (profile, offeringPlans = []) => {
   };
 };
 
+const upsertDepartments = async (tx, profile) => {
+  const map = new Map();
+  for (const department of buildDepartmentSpecs(profile)) {
+    const row = await tx.department.upsert({
+      where: { code: department.code },
+      update: { name: department.name },
+      create: { name: department.name, code: department.code },
+    });
+    map.set(department.code, row);
+  }
+  return map;
+};
+
+const upsertPrograms = async (tx, profile, departmentByCode) => {
+  const map = new Map();
+  for (const program of buildProgramSpecs(profile)) {
+    const row = await tx.program.upsert({
+      where: { code: program.code },
+      update: {},
+      create: {
+        name: program.name,
+        code: program.code,
+        departmentId: departmentByCode.get(program.departmentCode).id,
+        description: `${profile.label} academic program for hybrid scheduling demos.`,
+        isActive: true,
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+    map.set(program.code, row);
+  }
+  return map;
+};
+
+const upsertCourses = async (tx, profile, programByCode, semester, offeringPlans) => {
+  const map = new Map();
+  for (const plan of offeringPlans) {
+    const courseKey = plan.courseKey ?? plan.code;
+    if (map.has(courseKey)) continue;
+    const row = await tx.course.upsert({
+      where: { code: courseKey },
+      update: {},
+      create: {
+        code: courseKey,
+        title: buildDatasetScopedLabel(plan.title, profile),
+        programId: programByCode.get(plan.programCode).id,
+        semesterId: semester.id,
+        credits: plan.credits ?? 3,
+        description: profile.realData
+          ? `${plan.title} (${plan.baseCode ?? courseKey}) - real FEIT offering.`
+          : `${profile.label} course seeded for feasible hybrid exam scheduling.`,
+        isActive: true,
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+    map.set(courseKey, row);
+  }
+  return map;
+};
+
+const upsertCourseOfferings = async (tx, profile, courseByCode, semester, offeringPlans) => {
+  const map = new Map();
+  for (const [index, plan] of offeringPlans.entries()) {
+    const courseKey = plan.courseKey ?? plan.code;
+    const section = plan.section ?? 'A';
+    const row = await tx.courseOffering.upsert({
+      where: {
+        courseId_semesterId_section: {
+          courseId: courseByCode.get(courseKey).id,
+          semesterId: semester.id,
+          section,
+        },
+      },
+      update: {},
+      create: {
+        courseId: courseByCode.get(courseKey).id,
+        semesterId: semester.id,
+        section,
+        instructor: plan.instructor ?? instructorNames[index % instructorNames.length],
+        expectedStudents: plan.target,
+        capacity: Math.max(plan.target + 12, 40),
+        day: plan.day ?? ['Monday', 'Tuesday', 'Wednesday', 'Thursday'][index % 4],
+        time: plan.time ?? ['09:00', '11:00', '13:00', '15:00'][index % 4],
+        roomLabel: 'Assigned by hybrid scheduler',
+        notes: plan.notes ?? `${profile.label} feasible course offering for demo scheduling.`,
+        priority: plan.priority,
+        difficulty: plan.difficulty,
+        courseType: plan.hasExam === false ? 'PROJECT' : 'COURSE',
+        hasExam: plan.hasExam !== false,
+        status: 'ACTIVE',
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+    map.set(plan.code, row);
+  }
+  return map;
+};
+
+const upsertCentersAndRooms = async (tx, profile) => {
+  const centerByCode = new Map();
+  const centerSpecs = buildCenterSpecs(profile);
+  const roomPlans = buildRoomPlans(profile, centerSpecs);
+
+  for (const [index, centerPlan] of centerSpecs.entries()) {
+    const center = await tx.center.upsert({
+      where: { code: centerPlan.code },
+      update: {},
+      create: {
+        name: buildDatasetScopedLabel(centerPlan.name, profile),
+        code: centerPlan.code,
+        location: centerPlan.location,
+        description: `${profile.label} exam center for demo scheduling.`,
+        isActive: true,
+        supervisors: [`${profile.label} Supervisor ${index + 1}`, `Operations Lead ${index + 1}`],
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+    centerByCode.set(centerPlan.code, center);
+  }
+
+  for (const roomPlan of roomPlans) {
+    const roomName = buildDatasetScopedLabel(roomPlan.name, profile);
+    await tx.room.upsert({
+      where: { name: roomName },
+      update: {},
+      create: {
+        centerId: centerByCode.get(roomPlan.centerCode).id,
+        name: roomName,
+        capacity: roomPlan.capacity,
+        status: 'AVAILABLE',
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+  }
+
+  return centerByCode;
+};
+
+const upsertStudents = async (tx, profile, programByCode, passwordHash) => {
+  const students = [];
+  const programCodes = buildProgramSpecs(profile).map((program) => program.code);
+  const studentsPerProgram = Math.max(1, profile.studentCount / programCodes.length);
+
+  for (let index = 0; index < profile.studentCount; index += 1) {
+    const programCode = programCodes[Math.floor(index / studentsPerProgram)] ?? programCodes[programCodes.length - 1];
+    const user = await upsertUser(tx, {
+      name: fullName(index),
+      email: buildStudentEmail(profile.key, index),
+      role: 'STUDENT',
+      passwordHash,
+    });
+    const student = await tx.student.upsert({
+      where: { universityId: buildStudentUniversityId(profile.namespace, index) },
+      update: {},
+      create: {
+        userId: user.id,
+        universityId: buildStudentUniversityId(profile.namespace, index),
+        programId: programByCode.get(programCode).id,
+        createdBy: buildCreatedBy(profile.key),
+      },
+    });
+    students.push({ ...student, programCode });
+  }
+
+  return students;
+};
+
+const upsertProctors = async (tx, profile, centerByCode, passwordHash, timeSlots) => {
+  for (let index = 0; index < profile.proctorCount; index += 1) {
+    const user = await upsertUser(tx, {
+      name: `Proctor ${fullName(index)}`,
+      email: buildProctorEmail(profile.key, index),
+      role: 'PROCTOR',
+      passwordHash,
+    });
+    const existingProctor = await tx.proctor.findUnique({ where: { userId: user.id } });
+    const proctor = existingProctor ?? await tx.proctor.create({
+      data: {
+        userId: user.id,
+        department: index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
+        maxExamsPerDay: index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
+        createdBy: buildCreatedBy(profile.key),
+        updatedBy: buildCreatedBy(profile.key),
+      },
+    });
+    await tx.proctorAvailability.createMany({
+      data: timeSlots.map((slot) => ({ proctorId: proctor.id, timeSlotId: slot.id })),
+      skipDuplicates: true,
+    });
+  }
+};
+
+const upsertExams = async (tx, profile, offeringByCode, offeringPlans) => {
+  for (const plan of offeringPlans) {
+    if (plan.hasExam === false) continue;
+    const offering = offeringByCode.get(plan.code);
+    const existingExam = await tx.exam.findFirst({ where: { courseOfferingId: offering.id } });
+    if (!existingExam) {
+      await tx.exam.create({
+        data: {
+          courseOfferingId: offering.id,
+          status: 'DRAFT',
+          duration: plan.duration,
+          createdBy: buildCreatedBy(profile.key),
+        },
+      });
+    }
+  }
+};
+
+const countLegacyDemoSchedules = async () => prisma.schedule.count({
+  where: {
+    OR: [
+      { createdBy: 'demo-data' },
+      { assignments: { some: { exam: { courseOffering: { course: { code: { startsWith: DEMO_PREFIX } } } } } } },
+    ],
+  },
+});
+
 export const generateDemoData = async (options = {}) => {
   const profile = getProfile(options.dataset ?? options.mode);
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
   const offeringPlans = buildOfferingPlans(profile);
+  await normalizeDatasetSemesterRows(profile);
+  const existingSummary = await countDemoData(profile.key);
   let registrationCount = 0;
+
+  if (existingSummary.schedules > 0) {
+    // Schedules exist: restore any manually-deleted entities without touching existing data or schedules
+    await prisma.$transaction(async (tx) => {
+      const departmentByCode = await upsertDepartments(tx, profile);
+      const programByCode = await upsertPrograms(tx, profile, departmentByCode);
+      const semester = await createSemester(tx, profile);
+      const courseByCode = await upsertCourses(tx, profile, programByCode, semester, offeringPlans);
+      const offeringByCode = await upsertCourseOfferings(tx, profile, courseByCode, semester, offeringPlans);
+      const centerByCode = await upsertCentersAndRooms(tx, profile);
+      const students = await upsertStudents(tx, profile, programByCode, passwordHash);
+      const timeSlots = await createTimeSlots(tx, profile);
+      await upsertProctors(tx, profile, centerByCode, passwordHash, timeSlots);
+      await upsertExams(tx, profile, offeringByCode, offeringPlans);
+      registrationCount = await createRegistrations(tx, students, offeringByCode, offeringPlans);
+    }, { timeout: 120000 });
+
+    return {
+      message: `${profile.label} restored missing data while preserving existing schedules.`,
+      dataset: profile.key,
+      datasetLabel: profile.label,
+      loginHint: 'Demo users use password Demo12345!',
+      summary: await countDemoData(profile.key),
+      overallSummary: await countDemoData(),
+      instruction: `Select ${profile.semesterName} in the scheduler to continue working with the preserved schedule data.`,
+      expectedTestCases: getExpectedTestCases(profile, offeringPlans),
+      generatedRegistrations: registrationCount,
+      preservedSchedules: existingSummary.schedules,
+    };
+  }
 
   await prisma.$transaction(async (tx) => {
     await clearDemoDatasetWithTx(tx, profile.key);
@@ -816,25 +1184,49 @@ export const generateDemoData = async (options = {}) => {
 
 export const clearDemoData = async (options = {}) => {
   const datasetKey = options.dataset ? normalizeDatasetKey(options.dataset) : null;
-  await prisma.$transaction(async (tx) => {
-    if (datasetKey) {
-      await clearDemoDatasetWithTx(tx, datasetKey);
-    } else {
-      for (const currentDatasetKey of DEMO_DATASET_KEYS) {
-        await clearDemoDatasetWithTx(tx, currentDatasetKey);
-      }
-      await clearLegacyDemoDataWithTx(tx);
+  if (datasetKey) {
+    const profile = getProfile(datasetKey);
+    await normalizeDatasetSemesterRows(profile);
+    const existingSummary = await countDemoData(datasetKey);
+
+    if (existingSummary.schedules > 0) {
+      throw new AppError('Cannot delete demo dataset. Delete related schedules first from Schedule Versions.', 409);
     }
+
+    await prisma.$transaction(async (tx) => {
+      await clearDemoDatasetWithTx(tx, datasetKey);
+    }, { timeout: 120000 });
+
+    return {
+      message: `${profile.label} cleared successfully.`,
+      dataset: datasetKey,
+      datasetLabel: profile.label,
+      summary: await countDemoData(datasetKey),
+      overallSummary: await countDemoData(),
+    };
+  }
+
+  await Promise.all(DEMO_DATASET_KEYS.map((currentDatasetKey) => normalizeDatasetSemesterRows(getProfile(currentDatasetKey))));
+  const datasetStates = await Promise.all(DEMO_DATASET_KEYS.map(async (currentDatasetKey) => ({
+    key: currentDatasetKey,
+    summary: await countDemoData(currentDatasetKey),
+  })));
+  const hasProtectedDataset = datasetStates.some((entry) => entry.summary.schedules > 0);
+  const legacyScheduleCount = await countLegacyDemoSchedules();
+
+  if (hasProtectedDataset || legacyScheduleCount > 0) {
+    throw new AppError('Cannot delete demo dataset. Delete related schedules first from Schedule Versions.', 409);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    for (const currentDatasetKey of DEMO_DATASET_KEYS) {
+      await clearDemoDatasetWithTx(tx, currentDatasetKey);
+    }
+    await clearLegacyDemoDataWithTx(tx);
   }, { timeout: 120000 });
 
-  const profile = datasetKey ? getProfile(datasetKey) : null;
   return {
-    message: datasetKey
-      ? `${profile.label} cleared successfully.`
-      : 'Demo datasets cleared successfully.',
-    dataset: datasetKey ?? undefined,
-    datasetLabel: profile?.label,
-    summary: await countDemoData(datasetKey ?? undefined),
+    message: 'Demo datasets cleared successfully.',
     overallSummary: await countDemoData(),
   };
 };

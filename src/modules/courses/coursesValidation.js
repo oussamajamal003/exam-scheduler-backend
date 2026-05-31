@@ -1,7 +1,14 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getCourseSchema = uuidParamSchema;
+
+export const getCoursesSchema = z.object({
+  query: listQueryBase.extend({
+    programId: z.string().uuid().optional(),
+    departmentId: z.string().uuid().optional(),
+  }).catchall(z.any()),
+});
 
 export const createCourseSchema = z.object({
   body: z.object({
@@ -28,11 +35,3 @@ export const updateCourseSchema = z.object({
   }),
 });
 
-export const getCoursesSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
-    programId: z.string().uuid().optional(),
-  }).catchall(z.any())
-});

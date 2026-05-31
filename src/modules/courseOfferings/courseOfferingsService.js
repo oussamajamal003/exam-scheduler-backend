@@ -1,5 +1,7 @@
 ﻿import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import { parseListQuery, buildOrderBy, buildMeta } from '../../utils/queryParser.js';
+import { assertNoScheduleAssignmentsForDependency, findImpactedScheduleIds, synchronizeSchedules } from '../schedules/scheduleSyncService.js';
 
 const courseOfferingInclude = {
   course: { include: { program: true } },
@@ -10,6 +12,72 @@ const courseOfferingInclude = {
     },
   },
   exams: true,
+  _count: { select: { registrations: true, exams: true } },
+};
+
+// Lightweight select for list endpoints: only fields rendered by the table
+// and search/indexing helpers, plus aggregate counts.
+const courseOfferingListSelect = {
+  id: true,
+  courseId: true,
+  semesterId: true,
+  section: true,
+  instructor: true,
+  expectedStudents: true,
+  capacity: true,
+  credits: true,
+  day: true,
+  time: true,
+  endTime: true,
+  roomLabel: true,
+  notes: true,
+  courseType: true,
+  hasExam: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  course: {
+    select: {
+      id: true,
+      code: true,
+      title: true,
+      credits: true,
+      program: {
+        select: {
+          id: true,
+          name: true,
+          code: true,
+        },
+      },
+    },
+  },
+  semester: {
+    select: {
+      id: true,
+      name: true,
+      startDate: true,
+      endDate: true,
+    },
+  },
+  exams: {
+    select: {
+      id: true,
+      assignments: {
+        select: {
+          id: true,
+          schedule: { select: { id: true, name: true } },
+          timeSlot: {
+            select: {
+              id: true,
+              date: true,
+              startTime: true,
+              endTime: true,
+            },
+          },
+        },
+      },
+    },
+  },
   _count: { select: { registrations: true, exams: true } },
 };
 
@@ -48,41 +116,49 @@ const normalizeCourseOffering = (offering) => {
     ...offering,
     course,
     program: course?.program ?? null,
-    enrollments: offering.registrations ?? [],
+    ...(Array.isArray(offering.registrations) ? { enrollments: offering.registrations } : {}),
+    ...(Array.isArray(offering.exams) ? { exams: offering.exams } : {}),
   };
 };
 
+const OFFERING_SORT_FIELDS = {
+  section:          (dir) => ({ section: dir }),
+  expectedStudents: (dir) => ({ expectedStudents: dir }),
+  status:           (dir) => ({ status: dir }),
+  createdAt:        (dir) => ({ createdAt: dir }),
+};
+
 export const getAll = async (query = {}) => {
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip, sortField, sortDirection, search } = parseListQuery(query);
 
   const where = {};
   if (query.courseId) where.courseId = query.courseId;
   if (query.semesterId) where.semesterId = query.semesterId;
+  if (query.departmentId) where.course = { ...(where.course ?? {}), program: { departmentId: query.departmentId } };
   if (query.courseType) where.courseType = query.courseType;
   if (query.hasExam !== undefined) where.hasExam = query.hasExam === true || query.hasExam === 'true';
   if (query.status) where.status = query.status;
-  if (query.search) {
+  if (search) {
     where.OR = [
-      { section: { contains: query.search, mode: 'insensitive' } },
-      { course: { code: { contains: query.search, mode: 'insensitive' } } },
-      { course: { title: { contains: query.search, mode: 'insensitive' } } },
+      { section: { contains: search, mode: 'insensitive' } },
+      { course: { code: { contains: search, mode: 'insensitive' } } },
+      { course: { title: { contains: search, mode: 'insensitive' } } },
     ];
   }
 
+  const orderBy = buildOrderBy(
+    sortField,
+    sortDirection,
+    OFFERING_SORT_FIELDS,
+    [{ semester: { startDate: 'desc' } }, { course: { code: 'asc' } }],
+  );
+
   const [data, total] = await Promise.all([
-    prisma.courseOffering.findMany({
-      where,
-      skip,
-      take: limit,
-      orderBy: [{ semester: { startDate: 'desc' } }, { course: { code: 'asc' } }],
-      include: courseOfferingInclude,
-    }),
+    prisma.courseOffering.findMany({ where, skip, take: limit, orderBy, select: courseOfferingListSelect }),
     prisma.courseOffering.count({ where }),
   ]);
 
-  return { data: data.map(normalizeCourseOffering), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  return { data: data.map(normalizeCourseOffering), meta: buildMeta(total, page, limit) };
 };
 
 export const getById = async (id) => {
@@ -142,19 +218,28 @@ export const update = async (id, data) => {
   }
 
   const offering = await prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'courseOffering', ids: [id] }, tx);
     if (normalizedData.courseType === 'PROJECT') {
       await tx.exam.deleteMany({ where: { courseOfferingId: id } });
     }
 
-    return tx.courseOffering.update({
+    const updated = await tx.courseOffering.update({
       where: { id },
       data: toCourseOfferingWriteData(normalizedData),
       include: courseOfferingInclude,
     });
+    await synchronizeSchedules(scheduleIds, tx);
+    return updated;
   });
   return normalizeCourseOffering(offering);
 };
 
 export const remove = async (id) => {
-  return await prisma.courseOffering.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'courseOffering', ids: [id] }, tx);
+    await assertNoScheduleAssignmentsForDependency({ dependency: 'courseOffering', ids: [id], entityLabel: 'Course Offering' }, tx);
+    const deleted = await tx.courseOffering.delete({ where: { id } });
+    await synchronizeSchedules(scheduleIds, tx);
+    return deleted;
+  });
 };

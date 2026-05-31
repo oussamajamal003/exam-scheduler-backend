@@ -1,10 +1,5 @@
 import { z } from 'zod';
-
-const uuidParamSchema = z.object({
-  params: z.object({
-    id: z.string().uuid(),
-  }),
-});
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 export const getExamSchema = uuidParamSchema;
 
@@ -26,12 +21,10 @@ export const updateExamSchema = z.object({
 });
 
 export const getExamsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(100).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
     courseOfferingId: z.string().uuid().optional(),
+    semesterId: z.string().uuid().optional(),
     scheduleId: z.string().uuid().optional(),
     status: z.enum(['DRAFT', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']).optional(),
-  }).catchall(z.any())
+  }).catchall(z.any()),
 });

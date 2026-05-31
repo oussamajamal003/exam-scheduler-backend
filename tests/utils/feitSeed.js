@@ -111,10 +111,7 @@ export const seedFeitScenario = async (options = {}) => {
         name: semesterName ?? `${fixture.semesterName} [${namespace}]`,
         startDate: toDate(fixture.semesterStartDate, '00:00'),
         endDate: toDate(fixture.semesterEndDate, '23:59'),
-        isActive: true,
-        isCurrent: true,
         academicYear: fixture.academicYear,
-        status: 'ACTIVE',
         createdBy,
       },
     });
@@ -232,11 +229,9 @@ export const seedFeitScenario = async (options = {}) => {
       timeSlots.push(slot);
     }
 
-    // Proctors + availability (one proctor per center round-robin)
-    const centerList = [...centerByCode.values()];
+    // Proctors + availability
     const proctors = [];
     for (let i = 0; i < proctorCount; i += 1) {
-      const center = centerList[i % centerList.length];
       const email = `test.${namespace.toLowerCase()}.proc${String(i).padStart(3, '0')}@uni.test`;
       const user = await tx.user.create({
         data: { name: `Proctor ${fullName(i)}`, email, role: 'PROCTOR', password: passwordHash },
@@ -244,7 +239,6 @@ export const seedFeitScenario = async (options = {}) => {
       const proctor = await tx.proctor.create({
         data: {
           userId: user.id,
-          centerId: center.id,
           department: 'Exam Operations',
           maxExamsPerDay: 4,
           createdBy,
@@ -316,7 +310,7 @@ export const seedFeitScenario = async (options = {}) => {
       namespace,
       semester,
       programs: [...programByCode.values()],
-      centers: centerList,
+      centers: [...centerByCode.values()],
       rooms: createdRooms,
       timeSlots,
       proctors,

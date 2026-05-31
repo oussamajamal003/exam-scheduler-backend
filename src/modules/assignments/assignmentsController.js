@@ -4,7 +4,7 @@ import { catchAsync } from '../../utils/catchAsync.js';
 
 // GET /api/schedules/:scheduleId/assignments
 export const list = catchAsync(async (req, res) => {
-  const result = await service.listForSchedule(req.params.scheduleId);
+  const result = await service.listForSchedulePage(req.params.scheduleId, req.query);
   sendResponse(res, 200, 'Schedule assignments retrieved', result);
 });
 

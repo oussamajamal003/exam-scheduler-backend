@@ -8,6 +8,7 @@ import {
 	getEnrollmentSchema,
 	getEnrollmentOfferingSchema,
 	getEnrollmentStudentSchema,
+	getEnrollmentFiltersSchema,
 	getEnrollmentsSchema,
 	updateEnrollmentSchema,
 } from './enrollmentsValidation.js';
@@ -17,6 +18,7 @@ const router = express.Router();
 router.use(authenticate);
 
 router.get('/', roleGuard(['ADMIN', 'STUDENT']), validate(getEnrollmentsSchema), controller.getAll);
+router.get('/filters', roleGuard(['ADMIN', 'STUDENT']), validate(getEnrollmentFiltersSchema), controller.getFilterOptions);
 router.get('/student/:studentId', roleGuard(['ADMIN', 'STUDENT']), validate(getEnrollmentStudentSchema), controller.getByStudent);
 router.get('/offering/:offeringId', roleGuard(['ADMIN', 'STUDENT']), validate(getEnrollmentOfferingSchema), controller.getByOffering);
 router.post('/bulk-import', roleGuard(['ADMIN']), validate(bulkImportEnrollmentsSchema), controller.bulkImport);

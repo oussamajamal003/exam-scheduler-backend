@@ -63,6 +63,7 @@ describe('Hybrid Scheduler — Publishing Rules (FEIT Spring 2026)', () => {
   let firstSchedule;
   let secondSchedule;
   let thirdSchedule;
+  let overlappingDraftSchedule;
 
   beforeAll(async () => {
     await truncateAll();
@@ -101,6 +102,23 @@ describe('Hybrid Scheduler — Publishing Rules (FEIT Spring 2026)', () => {
     const result = await publishSchedule(firstSchedule.scheduleId, { examPeriod: 'Midterm' });
     expect(result.schedule.isFinal).toBe(true);
     expect(result.schedule.examPeriod).toBe('Midterm');
+  });
+
+  it('allows generating another draft after a schedule is already published in the same semester', async () => {
+    overlappingDraftSchedule = await generateSchedule({
+      semesterId: scenario.semester.id,
+      scheduleName: 'Overlap Draft After Publish',
+    });
+
+    expect(overlappingDraftSchedule.scheduleId).toBeTruthy();
+    expect(overlappingDraftSchedule.assignmentsCount).toBeGreaterThan(0);
+    expect(overlappingDraftSchedule.schedule.isFinal).toBe(false);
+  });
+
+  it('rejects publish when a draft conflicts with an existing published schedule', async () => {
+    await expect(
+      publishSchedule(overlappingDraftSchedule.scheduleId, { examPeriod: 'Final' }),
+    ).rejects.toThrow(/conflicts with an existing published schedule/i);
   });
 
   it('rejects a duplicate Midterm publish in the same semester (case-insensitive)', async () => {

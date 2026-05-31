@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 const studentEmailSchema = z.string().email('Invalid email address').refine(
   (email) => email.toLowerCase().endsWith('@st.uni.edu'),
@@ -75,10 +75,8 @@ export const getStudentSchema = z.object({
 });
 
 export const getStudentsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
     programId: z.string().uuid().optional(),
+    departmentId: z.string().uuid().optional(),
   }).catchall(z.any()),
 });

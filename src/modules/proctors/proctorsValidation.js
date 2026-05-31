@@ -1,5 +1,5 @@
 ﻿import { z } from 'zod';
-import { uuidParamSchema } from '../../validations/common.js';
+import { uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 const proctorEmailSchema = z.string().email().refine(
   (email) => {
@@ -14,11 +14,9 @@ export const getProctorSchema = uuidParamSchema;
 export const createProctorSchema = z.object({
   body: z.object({
     userId: z.string().uuid().optional(),
-    centerId: z.string().uuid().optional(),
     name: z.string().min(1).optional(),
     email: proctorEmailSchema.optional(),
     department: z.string().min(1).optional(),
-    center: z.string().min(1).optional(),
     timeSlotIds: z.array(z.string().uuid()).optional(),
   }),
 });
@@ -29,19 +27,14 @@ export const updateProctorSchema = z.object({
     name: z.string().min(1).optional(),
     email: proctorEmailSchema.optional(),
     department: z.string().min(1).optional(),
-    center: z.string().min(1).optional(),
     userId: z.string().uuid().optional(),
-    centerId: z.string().uuid().optional(),
     timeSlotIds: z.array(z.string().uuid()).optional(),
   }),
 });
 
 export const getProctorsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
-    centerId: z.string().uuid().optional(),
+  query: listQueryBase.extend({
     userId: z.string().uuid().optional(),
-  }).catchall(z.any())
+    department: z.string().optional(),
+  }).catchall(z.any()),
 });

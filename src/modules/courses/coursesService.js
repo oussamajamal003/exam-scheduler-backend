@@ -1,45 +1,49 @@
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
+import { parseListQuery, buildOrderBy, buildMeta } from '../../utils/queryParser.js';
+import { assertNoScheduleAssignmentsForDependency, findImpactedScheduleIds, synchronizeSchedules } from '../schedules/scheduleSyncService.js';
+
+const COURSE_SORT_FIELDS = {
+  code:      (dir) => ({ code: dir }),
+  title:     (dir) => ({ title: dir }),
+  credits:   (dir) => ({ credits: dir }),
+  createdAt: (dir) => ({ createdAt: dir }),
+};
 
 export const getAll = async (query = {}) => {
-  const page = parseInt(query.page) || 1;
-  const limit = parseInt(query.limit) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip, sortField, sortDirection, search } = parseListQuery(query);
 
   const where = {};
   if (query.programId) where.programId = query.programId;
-  if (query.search) {
-    const searchFilter = { contains: query.search, mode: 'insensitive' };
-    where.OR = [
-      { title: searchFilter },
-      { code: searchFilter }
-    ];
+  if (query.departmentId) where.program = { departmentId: query.departmentId };
+  if (search) {
+    const searchFilter = { contains: search, mode: 'insensitive' };
+    where.OR = [{ title: searchFilter }, { code: searchFilter }];
   }
+
+  const orderBy = buildOrderBy(sortField, sortDirection, COURSE_SORT_FIELDS, [{ code: 'asc' }]);
 
   const [data, total] = await Promise.all([
     prisma.course.findMany({
       where,
       skip,
       take: limit,
+      orderBy,
       include: {
         program: true,
         semester: true,
         courseOfferings: {
-          orderBy: [
-            { createdAt: 'desc' },
-          ],
+          orderBy: [{ createdAt: 'desc' }],
           take: 1,
-          include: {
-            semester: true,
-          },
+          include: { semester: true },
         },
         _count: { select: { courseOfferings: true } },
       },
     }),
-    prisma.course.count({ where })
+    prisma.course.count({ where }),
   ]);
-  
-  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+
+  return { data, meta: buildMeta(total, page, limit) };
 };
 
 export const getById = async (id) => {
@@ -72,26 +76,34 @@ const courseInclude = {
   },
 };
 
+const normalizeUniqueText = (value) => String(value ?? '').trim();
+
+const assertUniqueCourseIdentity = async ({ code, title, excludeId, client = prisma }) => {
+  const normalizedCode = normalizeUniqueText(code);
+  const normalizedTitle = normalizeUniqueText(title);
+
+  if (normalizedCode) {
+    const codeMatch = await client.course.findFirst({
+      where: { code: { equals: normalizedCode, mode: 'insensitive' }, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
+      select: { id: true },
+    });
+    if (codeMatch) throw new AppError(`Course code "${normalizedCode}" already exists.`, 409);
+  }
+
+  if (normalizedTitle) {
+    const titleMatch = await client.course.findFirst({
+      where: { title: { equals: normalizedTitle, mode: 'insensitive' }, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
+      select: { id: true },
+    });
+    if (titleMatch) throw new AppError(`Course name "${normalizedTitle}" already exists.`, 409);
+  }
+};
+
 export const create = async (data) => {
   const courseData = { ...data };
   if (!courseData.semesterId) courseData.semesterId = null;
 
-  // Friendly check for the [code, semesterId] uniqueness so we can return a
-  // clear message: the same course code is allowed across different semesters,
-  // but not within the same semester (or twice with no semester).
-  const existing = await prisma.course.findFirst({
-    where: { code: courseData.code, semesterId: courseData.semesterId },
-    select: { id: true, semester: { select: { name: true } } },
-  });
-  if (existing) {
-    const where = existing.semester?.name
-      ? `in ${existing.semester.name}`
-      : 'with no semester assigned';
-    throw new AppError(
-      `A course with code "${courseData.code}" already exists ${where}. Pick a different semester to create another.`,
-      409
-    );
-  }
+  await assertUniqueCourseIdentity({ code: courseData.code, title: courseData.title });
 
   const course = await prisma.course.create({
     data: courseData,
@@ -107,40 +119,33 @@ export const update = async (id, data) => {
     courseData.semesterId = null;
   }
 
-  // If code or semesterId is changing, ensure the new pair is still unique.
-  if (courseData.code !== undefined || 'semesterId' in courseData) {
+  if (courseData.code !== undefined || courseData.title !== undefined) {
     const current = await prisma.course.findUnique({
       where: { id },
-      select: { code: true, semesterId: true },
+      select: { code: true, title: true },
     });
     if (!current) throw new AppError('Not found', 404);
-    const nextCode = courseData.code ?? current.code;
-    const nextSemesterId =
-      'semesterId' in courseData ? courseData.semesterId : current.semesterId;
-    const clash = await prisma.course.findFirst({
-      where: {
-        code: nextCode,
-        semesterId: nextSemesterId,
-        NOT: { id },
-      },
-      select: { id: true, semester: { select: { name: true } } },
+    await assertUniqueCourseIdentity({
+      code: courseData.code ?? current.code,
+      title: courseData.title ?? current.title,
+      excludeId: id,
     });
-    if (clash) {
-      const where = clash.semester?.name
-        ? `in ${clash.semester.name}`
-        : 'with no semester assigned';
-      throw new AppError(
-        `A course with code "${nextCode}" already exists ${where}.`,
-        409
-      );
-    }
   }
 
-  await prisma.course.update({ where: { id }, data: courseData });
-
-  return prisma.course.findUnique({ where: { id }, include: courseInclude });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'course', ids: [id] }, tx);
+    await tx.course.update({ where: { id }, data: courseData });
+    await synchronizeSchedules(scheduleIds, tx);
+    return tx.course.findUnique({ where: { id }, include: courseInclude });
+  });
 };
 
 export const remove = async (id) => {
-  return await prisma.course.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'course', ids: [id] }, tx);
+    await assertNoScheduleAssignmentsForDependency({ dependency: 'course', ids: [id], entityLabel: 'Course' }, tx);
+    const deleted = await tx.course.delete({ where: { id } });
+    await synchronizeSchedules(scheduleIds, tx);
+    return deleted;
+  });
 };

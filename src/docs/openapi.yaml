@@ -3114,39 +3114,3 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /ai/evaluate-schedule/{scheduleId}:
-    parameters:
-      - in: path
-        name: scheduleId
-        required: true
-        schema:
-          type: string
-          format: uuid
-    post:
-      tags: [AI]
-      summary: Evaluate a schedule using AI
-      responses:
-        '200':
-          description: Schedule evaluation complete
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Schedule not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'

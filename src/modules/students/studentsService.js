@@ -2,6 +2,8 @@ import prisma from '../../config/prisma.js';
 import bcrypt from 'bcrypt';
 import { AppError } from '../../utils/AppError.js';
 import { normalizeRole } from '../../guards/roleGuard.js';
+import { parseListQuery, buildOrderBy, buildMeta } from '../../utils/queryParser.js';
+import { assertNoScheduleAssignmentsForDependency, findImpactedScheduleIds, synchronizeSchedules } from '../schedules/scheduleSyncService.js';
 
 const isStudentEmail = (email) => email?.toLowerCase().endsWith('@st.uni.edu');
 
@@ -17,14 +19,19 @@ const assertStudentAccess = (id, user) => {
   }
 };
 
+const STUDENT_SORT_FIELDS = {
+  name:         (dir) => ({ user: { name: dir } }),
+  universityId: (dir) => ({ universityId: dir }),
+  email:        (dir) => ({ user: { email: dir } }),
+  createdAt:    (dir) => ({ user: { createdAt: dir } }),
+};
+
 export const getAllStudents = async (query) => {
-  const { page = 1, limit = 10, search, programId } = query;
-  const parsedPage = parseInt(page);
-  const parsedLimit = parseInt(limit);
-  const skip = (parsedPage - 1) * parsedLimit;
+  const { page, limit, skip, sortField, sortDirection, search } = parseListQuery(query);
 
   const where = {};
-  if (programId) where.programId = programId;
+  if (query.programId) where.programId = query.programId;
+  if (query.departmentId) where.program = { departmentId: query.departmentId };
   if (search) {
     where.OR = [
       { universityId: { contains: search, mode: 'insensitive' } },
@@ -33,25 +40,20 @@ export const getAllStudents = async (query) => {
     ];
   }
 
+  const orderBy = buildOrderBy(sortField, sortDirection, STUDENT_SORT_FIELDS, { user: { name: 'asc' } });
+
   const [students, total] = await Promise.all([
     prisma.student.findMany({
       where,
       skip,
-      take: parsedLimit,
-      include: { user: { select: { name: true, email: true } }, program: { include: { department: true } } }
+      take: limit,
+      orderBy,
+      include: { user: { select: { name: true, email: true } }, program: { include: { department: true } } },
     }),
     prisma.student.count({ where }),
   ]);
 
-  return {
-    data: students,
-    meta: {
-      total,
-      page: parsedPage,
-      limit: parsedLimit,
-      totalPages: Math.ceil(total / parsedLimit),
-    },
-  };
+  return { data: students, meta: buildMeta(total, page, limit) };
 };
 
 export const getStudentById = async (id, user) => {
@@ -159,6 +161,7 @@ export const updateStudent = async (id, data) => {
     }
 
     return await prisma.$transaction(async (tx) => {
+      const scheduleIds = await findImpactedScheduleIds({ dependency: 'student', ids: [id] }, tx);
       await tx.user.update({
         where: { id: student.userId },
         data: {
@@ -167,18 +170,25 @@ export const updateStudent = async (id, data) => {
         },
       });
 
-      return await tx.student.update({
+      const updated = await tx.student.update({
         where: { id },
         data: nextStudentData,
         include: { user: true, program: { include: { department: true } } },
       });
+      await synchronizeSchedules(scheduleIds, tx);
+      return updated;
     });
   }
 
-  return await prisma.student.update({
-    where: { id },
-    data: nextStudentData,
-    include: { user: true, program: { include: { department: true } } },
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'student', ids: [id] }, tx);
+    const updated = await tx.student.update({
+      where: { id },
+      data: nextStudentData,
+      include: { user: true, program: { include: { department: true } } },
+    });
+    await synchronizeSchedules(scheduleIds, tx);
+    return updated;
   });
 };
 
@@ -186,7 +196,13 @@ export const deleteStudent = async (id) => {
   const student = await prisma.student.findUnique({ where: { id } });
   if (!student) throw new AppError('Student not found', 404);
 
-  return await prisma.student.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const scheduleIds = await findImpactedScheduleIds({ dependency: 'student', ids: [id] }, tx);
+    await assertNoScheduleAssignmentsForDependency({ dependency: 'student', ids: [id], entityLabel: 'Student' }, tx);
+    const deleted = await tx.student.delete({ where: { id } });
+    await synchronizeSchedules(scheduleIds, tx);
+    return deleted;
+  });
 };
 
 export const getStudentExams = async (id, user) => {

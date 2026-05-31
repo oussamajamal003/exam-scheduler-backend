@@ -1,5 +1,3 @@
-import { closePrismaConnections } from '../../src/config/prisma.js';
-
 const formatHandle = (handle) => {
   const type = handle?.constructor?.name ?? typeof handle;
 
@@ -42,6 +40,7 @@ if (!globalThis.__JEST_PRISMA_TEARDOWN_REGISTERED__) {
 
   if (process.env.JEST_TRACE_HANDLES === '1') {
     afterAll(async () => {
+      const { closePrismaConnections } = await import('../../src/config/prisma.js');
       await closePrismaConnections();
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -58,6 +57,7 @@ if (!globalThis.__JEST_PRISMA_TEARDOWN_REGISTERED__) {
   }
 
   process.once('beforeExit', async () => {
+    const { closePrismaConnections } = await import('../../src/config/prisma.js');
     await closePrismaConnections();
   });
 }

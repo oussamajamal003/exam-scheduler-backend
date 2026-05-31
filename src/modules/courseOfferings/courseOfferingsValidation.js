@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { uuidParamSchema as _uuidParamSchema, listQueryBase } from '../../validations/common.js';
 
 const courseTypeSchema = z.enum(['COURSE', 'PROJECT']);
 const booleanQuerySchema = z.preprocess((value) => {
@@ -22,11 +23,7 @@ const enforceExamEligibilityConsistency = (body) => body.superRefine((data, ctx)
   }
 });
 
-const uuidParamSchema = z.object({
-  params: z.object({
-    id: z.string().uuid(),
-  }),
-});
+const uuidParamSchema = _uuidParamSchema;
 
 export const getCourseOfferingSchema = uuidParamSchema;
 
@@ -38,8 +35,10 @@ export const createCourseOfferingSchema = z.object({
     instructor: z.string().optional(),
     expectedStudents: z.coerce.number().int().min(0).optional(),
     capacity: z.coerce.number().int().min(0).optional(),
+    credits: z.coerce.number().int().min(0).optional(),
     day: z.string().optional(),
     time: z.string().optional(),
+    endTime: z.string().optional(),
     roomLabel: z.string().optional(),
     notes: z.string().optional(),
     courseType: courseTypeSchema.optional().default('COURSE'),
@@ -58,8 +57,10 @@ export const updateCourseOfferingSchema = z.object({
     instructor: z.string().optional(),
     expectedStudents: z.coerce.number().int().min(0).optional(),
     capacity: z.coerce.number().int().min(0).optional(),
+    credits: z.coerce.number().int().min(0).optional(),
     day: z.string().optional(),
     time: z.string().optional(),
+    endTime: z.string().optional(),
     roomLabel: z.string().optional(),
     notes: z.string().optional(),
     courseType: courseTypeSchema.optional(),
@@ -70,12 +71,10 @@ export const updateCourseOfferingSchema = z.object({
 });
 
 export const getCourseOfferingsSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(5000).optional().default(10),
-    search: z.string().optional(),
+  query: listQueryBase.extend({
     courseId: z.string().uuid().optional(),
     semesterId: z.string().uuid().optional(),
+    departmentId: z.string().uuid().optional(),
     courseType: courseTypeSchema.optional(),
     hasExam: booleanQuerySchema.optional(),
     status: z.enum(['ACTIVE', 'INACTIVE', 'CANCELLED']).optional(),
