@@ -168,17 +168,22 @@ export const update = async (id, data) => {
       data: updatePayload,
       include: proctorInclude,
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return proctor;
   });
 };
 
 export const remove = async (id) => {
+  const proctor = await prisma.proctor.findUnique({ where: { id }, select: { userId: true } });
+  if (!proctor) throw new AppError('Proctor not found', 404);
+
   return prisma.$transaction(async (tx) => {
     const scheduleIds = await findImpactedScheduleIds({ dependency: 'proctor', ids: [id] }, tx);
     await assertNoScheduleAssignmentsForDependency({ dependency: 'proctor', ids: [id], entityLabel: 'Proctor' }, tx);
     await removeAssignmentsForDependencyDelete({ dependency: 'proctor', ids: [id] }, tx);
-    const deleted = await tx.proctor.delete({ where: { id } });
+    await tx.proctor.delete({ where: { id } });
+    // Remove the linked login account so deleting a proctor also removes its user.
+    const deleted = await tx.user.delete({ where: { id: proctor.userId } });
     await synchronizeSchedules(scheduleIds, tx);
     return deleted;
   });

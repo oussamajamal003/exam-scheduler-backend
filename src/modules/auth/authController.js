@@ -11,6 +11,10 @@ export const logout = (req, res) => {
   sendResponse(res, 200, 'Logged out successfully');
 };
 
+export const me = catchAsync(async (req, res) => {
+  sendResponse(res, 200, 'Current user fetched successfully', req.user);
+});
+
 export const getAllUsers = catchAsync(async (req, res) => {
   const users = await fetchAllUsers();
   sendResponse(res, 200, 'Users fetched successfully', users);

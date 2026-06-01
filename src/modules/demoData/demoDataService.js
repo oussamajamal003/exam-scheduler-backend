@@ -31,7 +31,7 @@ const courseTemplates = [
   { code: 'MIS230', title: 'Enterprise Systems', programCode: 'MIS', cohorts: ['MIS'], target: 46, duration: 120, priority: 70, difficulty: 6 },
   { code: 'CE210', title: 'Embedded Systems', programCode: 'CE', cohorts: ['CE'], target: 42, duration: 150, priority: 68, difficulty: 8 },
   { code: 'CS330', title: 'Operating Systems', programCode: 'CS', cohorts: ['CS'], target: 38, duration: 120, priority: 64, difficulty: 8 },
-  { code: 'IT310', title: 'Cloud Infrastructure', programCode: 'IT', cohorts: ['IT'], target: 36, duration: 180, priority: 62, difficulty: 8 },
+  { code: 'IT310', title: 'Cloud Infrastructure', programCode: 'IT', cohorts: ['IT'], target: 36, duration: 150, priority: 62, difficulty: 8 },
   { code: 'MIS340', title: 'Decision Support Systems', programCode: 'MIS', cohorts: ['MIS'], target: 34, duration: 120, priority: 60, difficulty: 6 },
   { code: 'CE320', title: 'Computer Architecture', programCode: 'CE', cohorts: ['CE'], target: 36, duration: 120, priority: 58, difficulty: 8 },
   { code: 'STAT305', title: 'Applied Statistics for Computing', programCode: 'MIS', cohorts: ['MIS', 'IT'], target: 50, duration: 120, priority: 56, difficulty: 7 },
@@ -69,8 +69,11 @@ const roomNamePool = [
 
 const roomCapacityPool = [220, 200, 180, 160, 140, 128, 116, 104, 96, 88, 80, 72, 64, 56, 48, 42];
 const slotSessions = [
-  ['09:00', '12:00'],
-  ['13:00', '16:00'],
+  ['09:00', '11:00'],
+  ['11:30', '13:30'],
+  ['14:00', '16:00'],
+  ['09:00', '11:30'],
+  ['13:00', '15:30'],
 ];
 const courseTitleVariants = ['Advanced', 'Applied', 'Studio', 'Laboratory', 'Seminar', 'Workshop'];
 
@@ -555,13 +558,7 @@ const deleteScopedAssignmentsWithTx = async (tx, { scheduleWhere, examWhere, roo
     await tx.examAssignment.deleteMany({ where: { OR: assignmentScope } });
   }
 
-  const scheduleIdsToDelete = [...new Set([...scheduleIds, ...assignmentScheduleIds])];
-
-  if (scheduleIdsToDelete.length > 0) {
-    await tx.schedule.deleteMany({ where: { id: { in: scheduleIdsToDelete } } });
-  }
-
-  return { roomIds };
+  return { roomIds, scheduleIds, assignmentScheduleIds };
 };
 
 const clearDemoDatasetWithTx = async (tx, datasetKey) => {
@@ -894,7 +891,7 @@ const getExpectedTestCases = (profile, offeringPlans = []) => {
     offerings: `${offeringCount} active course offerings seeded for ${profile.semesterName} (${examCount} producing exams; PROJECT and LAB-only offerings are excluded).`,
     rooms: `${profile.roomCount} available rooms distributed across ${profile.centerCount} centers with large-capacity halls for high-demand exams.`,
     proctors: `${profile.proctorCount} proctors are available across the full time-slot grid to keep the dataset feasible.`,
-    timeSlots: `${profile.slotDays * slotSessions.length} valid 180-minute time slots are available inside the semester exam window.`,
+    timeSlots: `${profile.slotDays * slotSessions.length} valid 120-minute and 150-minute time slots are available inside the semester exam window.`,
   };
 };
 
@@ -1082,6 +1079,7 @@ const upsertProctors = async (tx, profile, centerByCode, passwordHash, timeSlots
         updatedBy: buildCreatedBy(profile.key),
       },
     });
+    await tx.proctorAvailability.deleteMany({ where: { proctorId: proctor.id } });
     await tx.proctorAvailability.createMany({
       data: timeSlots.map((slot) => ({ proctorId: proctor.id, timeSlotId: slot.id })),
       skipDuplicates: true,
@@ -1187,11 +1185,6 @@ export const clearDemoData = async (options = {}) => {
   if (datasetKey) {
     const profile = getProfile(datasetKey);
     await normalizeDatasetSemesterRows(profile);
-    const existingSummary = await countDemoData(datasetKey);
-
-    if (existingSummary.schedules > 0) {
-      throw new AppError('Cannot delete demo dataset. Delete related schedules first from Schedule Versions.', 409);
-    }
 
     await prisma.$transaction(async (tx) => {
       await clearDemoDatasetWithTx(tx, datasetKey);
@@ -1207,15 +1200,10 @@ export const clearDemoData = async (options = {}) => {
   }
 
   await Promise.all(DEMO_DATASET_KEYS.map((currentDatasetKey) => normalizeDatasetSemesterRows(getProfile(currentDatasetKey))));
-  const datasetStates = await Promise.all(DEMO_DATASET_KEYS.map(async (currentDatasetKey) => ({
-    key: currentDatasetKey,
-    summary: await countDemoData(currentDatasetKey),
-  })));
-  const hasProtectedDataset = datasetStates.some((entry) => entry.summary.schedules > 0);
   const legacyScheduleCount = await countLegacyDemoSchedules();
 
-  if (hasProtectedDataset || legacyScheduleCount > 0) {
-    throw new AppError('Cannot delete demo dataset. Delete related schedules first from Schedule Versions.', 409);
+  if (legacyScheduleCount > 0) {
+    throw new AppError('Cannot delete legacy demo data while legacy schedules exist. Delete related schedules first from Schedule Versions.', 409);
   }
 
   await prisma.$transaction(async (tx) => {

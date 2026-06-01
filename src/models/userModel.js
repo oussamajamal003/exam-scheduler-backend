@@ -6,6 +6,17 @@
 export const findUserByEmail = async (email) => {
   return await prisma.user.findUnique({
     where: { email },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      password: true,
+      role: true,
+      createdAt: true,
+      updatedAt: true,
+      student: { select: { id: true } },
+      proctor: { select: { id: true } },
+    },
   });
 };
 

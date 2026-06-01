@@ -74,6 +74,7 @@ export const getById = async (id, user) => {
 export const generateFromCourses = async (data) => {
   const { semesterId } = data;
   if (!semesterId) throw new AppError('semesterId is required', 400);
+  const defaultExamDuration = 120;
 
   const createdExams = await prisma.$transaction(async (tx) => {
     const offerings = await tx.courseOffering.findMany({
@@ -92,7 +93,7 @@ export const generateFromCourses = async (data) => {
           data: {
             courseOfferingId: offering.id,
             status: 'DRAFT',
-            duration: 120
+            duration: defaultExamDuration,
           }
         });
         rows.push(exam);

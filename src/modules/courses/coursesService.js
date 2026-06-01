@@ -135,7 +135,7 @@ export const update = async (id, data) => {
   return prisma.$transaction(async (tx) => {
     const scheduleIds = await findImpactedScheduleIds({ dependency: 'course', ids: [id] }, tx);
     await tx.course.update({ where: { id }, data: courseData });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return tx.course.findUnique({ where: { id }, include: courseInclude });
   });
 };

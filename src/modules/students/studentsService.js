@@ -199,7 +199,9 @@ export const deleteStudent = async (id) => {
   return prisma.$transaction(async (tx) => {
     const scheduleIds = await findImpactedScheduleIds({ dependency: 'student', ids: [id] }, tx);
     await assertNoScheduleAssignmentsForDependency({ dependency: 'student', ids: [id], entityLabel: 'Student' }, tx);
-    const deleted = await tx.student.delete({ where: { id } });
+    await tx.student.delete({ where: { id } });
+    // Remove the linked login account so deleting a student also removes its user.
+    const deleted = await tx.user.delete({ where: { id: student.userId } });
     await synchronizeSchedules(scheduleIds, tx);
     return deleted;
   });

@@ -50,7 +50,7 @@ import roleDashboardRoutes from './modules/roleDashboards/roleDashboardsRoutes.j
 import studentNotificationRoutes from './modules/studentNotifications/studentNotificationsRoutes.js';
 import studentPortalRoutes from './modules/studentPortal/studentPortalRoutes.js';
 import proctorPortalRoutes from './modules/proctorPortal/proctorPortalRoutes.js';
-
+import systemSettingsRoutes from './modules/systemSettings/systemSettingsRoutes.js';
 // Routes (existing)
 app.use('/api/auth', authRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
@@ -75,6 +75,7 @@ app.use('/api/role-dashboards', roleDashboardRoutes);
 app.use('/api/student-notifications', studentNotificationRoutes);
 app.use('/api/student', studentPortalRoutes);
 app.use('/api/proctor', proctorPortalRoutes);
+app.use('/api/settings', systemSettingsRoutes);
 
 // Compatibility aliases for the first scheduling prototype API surface.
 app.post('/generate-schedule', authenticate, roleGuard(['ADMIN']), validate(generateScheduleSchema), generateSchedule);

@@ -188,6 +188,84 @@ const buildScheduleMetadata = (schedule, role, entries, { isFinal = true, schedu
   assignments: entries,
 });
 
+const getScheduleUpdateChangeSummary = (schedule) => schedule?.algorithmMetadata?.scheduleSync?.changeSummary ?? null;
+
+const getScheduleUpdateCopy = (schedule, role, count) => {
+  const changeSummary = getScheduleUpdateChangeSummary(schedule);
+  const categories = new Set(changeSummary?.categories ?? []);
+  const hasRoomTimeChange = categories.has('roomTime');
+  const hasProctorChange = categories.has('proctor');
+  const hasExamChange = categories.has('exam');
+
+  if (role === 'STUDENT') {
+    if (hasRoomTimeChange && hasProctorChange) {
+      return {
+        title: 'Exam schedule updated',
+        message: `${schedule.name} updated room, time, and proctor details for ${count} ${count === 1 ? 'exam' : 'exams'} in your registered courses.`,
+      };
+    }
+
+    if (hasRoomTimeChange) {
+      return {
+        title: 'Room or time updated',
+        message: `${schedule.name} updated room or time details for ${count} ${count === 1 ? 'exam' : 'exams'} in your registered courses.`,
+      };
+    }
+
+    if (hasProctorChange) {
+      return {
+        title: 'Exam proctor updated',
+        message: `${schedule.name} updated proctor details for ${count} ${count === 1 ? 'exam' : 'exams'} in your registered courses.`,
+      };
+    }
+
+    if (hasExamChange) {
+      return {
+        title: 'Exam details updated',
+        message: `${schedule.name} updated exam details for ${count} ${count === 1 ? 'exam' : 'exams'} in your registered courses.`,
+      };
+    }
+
+    return {
+      title: 'Exam schedule updated',
+      message: `${schedule.name} has updated details for ${count} ${count === 1 ? 'exam' : 'exams'} in your registered courses. Please review the latest schedule.`,
+    };
+  }
+
+  if (hasRoomTimeChange && hasProctorChange) {
+    return {
+      title: 'Proctor duties updated',
+      message: `${schedule.name} updated room, time, and proctor details for ${count} ${count === 1 ? 'assigned duty' : 'assigned duties'} in your published roster.`,
+    };
+  }
+
+  if (hasRoomTimeChange) {
+    return {
+      title: 'Room or time updated',
+      message: `${schedule.name} updated room or time details for ${count} ${count === 1 ? 'assigned duty' : 'assigned duties'} in your published roster.`,
+    };
+  }
+
+  if (hasProctorChange) {
+    return {
+      title: 'Proctor assignment updated',
+      message: `${schedule.name} updated proctor details for ${count} ${count === 1 ? 'assigned duty' : 'assigned duties'} in your published roster.`,
+    };
+  }
+
+  if (hasExamChange) {
+    return {
+      title: 'Proctor duties updated',
+      message: `${schedule.name} updated assignment details for ${count} ${count === 1 ? 'assigned duty' : 'assigned duties'} in your published roster.`,
+    };
+  }
+
+  return {
+    title: 'Proctor duties updated',
+    message: `${schedule.name} updated ${count} ${count === 1 ? 'assigned duty' : 'assigned duties'} in your published roster.`,
+  };
+};
+
 const buildStudentEntries = (schedule) => {
   const recipients = new Map();
 
@@ -351,6 +429,7 @@ export const createSchedulePublicationNotifications = async ({
       name: true,
       examPeriod: true,
       publishedVersion: true,
+      algorithmMetadata: true,
       assignments: {
         select: {
           id: true,
@@ -393,13 +472,21 @@ export const createSchedulePublicationNotifications = async ({
   const proctorRecipients = buildProctorEntries(schedule);
 
   const metadataOptions = { isFinal: isFinalAfterEvent, scheduleVersion: resolvedVersion };
+  const updateCopyForStudent = type === NOTIFICATION_TYPES.SCHEDULE_UPDATED || type === NOTIFICATION_TYPES.ROOM_TIME_CHANGE
+    ? getScheduleUpdateCopy(schedule, 'STUDENT', 0)
+    : null;
+  const updateCopyForProctor = type === NOTIFICATION_TYPES.SCHEDULE_UPDATED || type === NOTIFICATION_TYPES.ROOM_TIME_CHANGE
+    ? getScheduleUpdateCopy(schedule, 'PROCTOR', 0)
+    : null;
 
   const studentNotifications = Array.from(studentRecipients.entries()).map(([userId, entries]) => ({
     id: randomUUID(),
     userId,
     type,
-    title: copy.studentTitle,
-    message: copy.studentMessage(schedule, entries.length),
+    title: updateCopyForStudent?.title ?? copy.studentTitle,
+    message: updateCopyForStudent
+      ? getScheduleUpdateCopy(schedule, 'STUDENT', entries.length).message
+      : copy.studentMessage(schedule, entries.length),
     metadata: buildScheduleMetadata(schedule, 'STUDENT', entries, metadataOptions),
     scheduleId: schedule.id,
     scheduleVersion: resolvedVersion,
@@ -409,8 +496,10 @@ export const createSchedulePublicationNotifications = async ({
     id: randomUUID(),
     userId,
     type,
-    title: copy.proctorTitle,
-    message: copy.proctorMessage(schedule, entries.length),
+    title: updateCopyForProctor?.title ?? copy.proctorTitle,
+    message: updateCopyForProctor
+      ? getScheduleUpdateCopy(schedule, 'PROCTOR', entries.length).message
+      : copy.proctorMessage(schedule, entries.length),
     metadata: buildScheduleMetadata(schedule, 'PROCTOR', entries, metadataOptions),
     scheduleId: schedule.id,
     scheduleVersion: resolvedVersion,

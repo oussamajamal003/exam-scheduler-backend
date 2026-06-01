@@ -7,6 +7,7 @@ import { loginSchema } from './authValidation.js';
 
 const router = express.Router();
 
+router.get('/me', authenticate, controller.me);
 router.get('/', authenticate, roleGuard(['ADMIN']), controller.getAllUsers);
 router.post('/login', validate(loginSchema), controller.login);
 router.post('/logout', authenticate, controller.logout);

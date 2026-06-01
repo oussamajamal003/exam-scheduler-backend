@@ -4,7 +4,7 @@ import { validate } from '../../middlewares/validate.js';
 import * as controller from './studentPortalController.js';
 import * as pdfController from '../schedulePdf/schedulePdfController.js';
 import * as settingsController from '../userSettings/userSettingsController.js';
-import { changePasswordSchema, updateSettingsSchema } from '../userSettings/userSettingsValidation.js';
+import { changePasswordSchema, updateProfileSchema, updateSettingsSchema } from '../userSettings/userSettingsValidation.js';
 
 const router = express.Router();
 
@@ -20,6 +20,8 @@ router.patch('/notifications/read-all', controller.markAllNotificationsRead);
 router.patch('/notifications/:id/read', controller.markNotificationRead);
 router.get('/published-schedules', controller.getPublishedSchedules);
 router.get('/settings', settingsController.getSettings);
+router.get('/settings/profile', settingsController.getProfile);
+router.patch('/settings/profile', validate(updateProfileSchema), settingsController.updateProfile);
 router.patch('/settings', validate(updateSettingsSchema), settingsController.updateSettings);
 router.patch('/settings/change-password', validate(changePasswordSchema), settingsController.changePassword);
 

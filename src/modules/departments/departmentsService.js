@@ -78,7 +78,7 @@ export const update = async (id, data) => {
       data,
       include: departmentInclude,
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return normalizeDepartment(department);
   });
 };

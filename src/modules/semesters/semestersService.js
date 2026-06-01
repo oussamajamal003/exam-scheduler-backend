@@ -130,7 +130,7 @@ export const update = async (id, data) => {
       data,
       include: semesterInclude,
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return updated;
   });
 };

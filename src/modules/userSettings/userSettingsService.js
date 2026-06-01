@@ -2,6 +2,15 @@ import bcrypt from 'bcrypt';
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 
+const profileSelect = {
+  id: true,
+  name: true,
+  email: true,
+  role: true,
+  createdAt: true,
+  updatedAt: true,
+};
+
 const selectSettings = {
   id: true,
   userId: true,
@@ -18,6 +27,25 @@ const ensureAuthenticatedUser = (user) => {
   return user.id;
 };
 
+const isStudentEmail = (email) => email?.toLowerCase().endsWith('@st.uni.edu');
+
+const isProctorEmail = (email) => {
+  const lower = email?.toLowerCase();
+  return Boolean(lower) && lower.endsWith('@uni.edu') && !lower.endsWith('@st.uni.edu');
+};
+
+const assertProfileEmailForRole = (role, email) => {
+  if (!email) return;
+
+  if (role === 'STUDENT' && !isStudentEmail(email)) {
+    throw new AppError('Student email must end with @st.uni.edu', 400);
+  }
+
+  if (role === 'PROCTOR' && !isProctorEmail(email)) {
+    throw new AppError('Proctor email must end with @uni.edu and not @st.uni.edu', 400);
+  }
+};
+
 export const getSettings = async (user) => {
   const userId = ensureAuthenticatedUser(user);
 
@@ -29,6 +57,36 @@ export const getSettings = async (user) => {
   });
 };
 
+
+export const getProfile = async (user) => {
+  const userId = ensureAuthenticatedUser(user);
+
+  return prisma.user.findUnique({
+    where: { id: userId },
+    select: profileSelect,
+  });
+};
+
+export const updateProfile = async (user, data) => {
+  const userId = ensureAuthenticatedUser(user);
+
+  if (data.email) {
+    assertProfileEmailForRole(user.role, data.email);
+    const duplicate = await prisma.user.findUnique({ where: { email: data.email } });
+    if (duplicate && duplicate.id !== userId) {
+      throw new AppError('Email is already in use by another account.', 409);
+    }
+  }
+
+  return prisma.user.update({
+    where: { id: userId },
+    data: {
+      ...(data.name ? { name: data.name } : {}),
+      ...(data.email ? { email: data.email } : {}),
+    },
+    select: profileSelect,
+  });
+};
 export const updateSettings = async (user, data) => {
   const userId = ensureAuthenticatedUser(user);
 

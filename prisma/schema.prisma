@@ -83,6 +83,20 @@ model UserSettings {
   @@map("user_settings")
 }
 
+model SystemSettings {
+  id                      String   @id @default("system")
+  systemName              String   @default("Smart SIS")
+  maintenanceMode         Boolean  @default(false)
+  allowScheduleGeneration Boolean  @default(true)
+  notificationsEnabled    Boolean  @default(true)
+  academicYear            String?
+  supportEmail            String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
 model Student {
   id            String                @id @default(uuid())
   userId        String                @unique

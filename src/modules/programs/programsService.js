@@ -83,7 +83,7 @@ export const update = async (id, data) => {
         _count: { select: { students: true, courses: true } },
       },
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return updated;
   });
 };

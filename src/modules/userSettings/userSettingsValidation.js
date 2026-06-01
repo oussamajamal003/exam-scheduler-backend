@@ -17,6 +17,13 @@ export const updateSettingsSchema = z.object({
   }),
 });
 
+export const updateProfileSchema = z.object({
+  body: z.object({
+    name: z.string().trim().min(1, 'Name is required').optional(),
+    email: z.string().trim().email('A valid email address is required').optional(),
+  }),
+});
+
 export const changePasswordSchema = z.object({
   body: z
     .object({

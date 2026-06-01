@@ -9,9 +9,14 @@ import {
 const GENERATED_STAGE = 'GENERATED';
 const BLOCKED_STAGE = 'BLOCKED';
 const AVAILABLE_ROOM_STATUS = 'AVAILABLE';
-const PROCTOR_RATIO = 20;
-
 const ACTIVE_REGISTRATION_STATUSES = new Set(['ACTIVE']);
+
+const computeRequiredProctors = (studentCount) => {
+  const count = Number(studentCount ?? 0);
+
+  if (!Number.isFinite(count) || count <= 0) return 1;
+  return Math.max(1, Math.ceil(count / 20));
+};
 
 const isActiveRegistration = (registration) => {
   if (!registration) return false;
@@ -40,15 +45,90 @@ const getRequiredSeatsForExam = (exam) => {
   return registrations.filter(isActiveRegistration).length;
 };
 
+const getCurrentDefaultExamDuration = async () => 120;
+
 const getRequiredProctorCount = (exam) => {
   const enrolledCount = getRequiredSeatsForExam(exam);
-  return Math.max(1, Math.ceil(enrolledCount / PROCTOR_RATIO));
+  return computeRequiredProctors(enrolledCount);
 };
 
 const mergeMetadata = (schedule, syncMetadata) => ({
   ...(schedule.algorithmMetadata && typeof schedule.algorithmMetadata === 'object' ? schedule.algorithmMetadata : {}),
   scheduleSync: syncMetadata,
 });
+
+const buildAssignmentSnapshot = (assignments) => assignments
+  .map((assignment) => ({
+    id: assignment.id,
+    examId: assignment.examId ?? null,
+    timeSlotId: assignment.timeSlotId ?? null,
+    roomId: assignment.roomId ?? null,
+    proctorId: assignment.proctorId ?? null,
+  }))
+  .sort((left, right) => left.id.localeCompare(right.id));
+
+const buildScheduleChangeSummary = (schedule) => {
+  const previousSnapshot = schedule.algorithmMetadata?.scheduleSync?.assignmentSnapshot;
+  const currentSnapshot = buildAssignmentSnapshot(schedule.assignments);
+
+  if (!Array.isArray(previousSnapshot) || previousSnapshot.length === 0) {
+    return {
+      categories: [],
+      changedAssignments: 0,
+      addedAssignments: 0,
+      removedAssignments: 0,
+      assignmentSnapshot: currentSnapshot,
+      hasPreviousSnapshot: false,
+    };
+  }
+
+  const previousById = new Map(previousSnapshot.map((assignment) => [assignment.id, assignment]));
+  const currentById = new Map(currentSnapshot.map((assignment) => [assignment.id, assignment]));
+  const categories = new Set();
+  let changedAssignments = 0;
+  let addedAssignments = 0;
+  let removedAssignments = 0;
+
+  for (const assignment of currentSnapshot) {
+    const previous = previousById.get(assignment.id);
+    if (!previous) {
+      addedAssignments += 1;
+      continue;
+    }
+
+    const roomOrTimeChanged = previous.roomId !== assignment.roomId || previous.timeSlotId !== assignment.timeSlotId;
+    const proctorChanged = previous.proctorId !== assignment.proctorId;
+    const examChanged = previous.examId !== assignment.examId;
+
+    if (roomOrTimeChanged || proctorChanged || examChanged) {
+      changedAssignments += 1;
+      if (roomOrTimeChanged) categories.add('roomTime');
+      if (proctorChanged) categories.add('proctor');
+      if (examChanged) categories.add('exam');
+    }
+  }
+
+  for (const assignment of previousSnapshot) {
+    if (!currentById.has(assignment.id)) {
+      removedAssignments += 1;
+    }
+  }
+
+  return {
+    categories: [...categories],
+    changedAssignments,
+    addedAssignments,
+    removedAssignments,
+    assignmentSnapshot: currentSnapshot,
+    hasPreviousSnapshot: true,
+  };
+};
+
+const toUpdateNotificationVersion = (date) => {
+  const millis = date instanceof Date ? date.getTime() : Number(date);
+  if (!Number.isFinite(millis)) return 0;
+  return Math.trunc(millis / 1000);
+};
 
 const buildImpactedSchedulesWhere = (dependency, ids) => {
   switch (dependency) {
@@ -162,6 +242,7 @@ const scheduleSyncInclude = {
 };
 
 const buildScheduleIssueSummary = async (schedule, client) => {
+  const defaultExamDuration = await getCurrentDefaultExamDuration(client);
   const semesterIds = new Set(
     schedule.assignments
       .map((assignment) => assignment.exam?.courseOffering?.semesterId)
@@ -196,7 +277,7 @@ const buildScheduleIssueSummary = async (schedule, client) => {
     const semesterStart = new Date(semester?.startDate);
     const semesterEnd = new Date(semester?.endDate);
     const slotDuration = Math.round((slotEnd.getTime() - slotStart.getTime()) / 60000);
-    const examDuration = exam?.duration ?? 120;
+    const examDuration = exam?.duration ?? defaultExamDuration;
 
     const hasInvalidWindow = (
       Number.isNaN(slotStart.getTime())
@@ -329,9 +410,10 @@ export const assertNoScheduleAssignmentsForDependency = async ({ dependency, ids
   }
 };
 
-export const synchronizeSchedules = async (scheduleIds, client = prisma) => {
+export const synchronizeSchedules = async (scheduleIds, client = prisma, options = {}) => {
   const normalizedScheduleIds = [...new Set((scheduleIds ?? []).filter(Boolean))];
   if (normalizedScheduleIds.length === 0) return [];
+  const { forceUpdateNotification = false } = options;
 
   const schedules = await client.schedule.findMany({
     where: { id: { in: normalizedScheduleIds } },
@@ -341,11 +423,13 @@ export const synchronizeSchedules = async (scheduleIds, client = prisma) => {
   const updated = [];
   for (const schedule of schedules) {
     const summary = await buildScheduleIssueSummary(schedule, client);
+    const changeSummary = buildScheduleChangeSummary(schedule);
     const shouldAutoUnpublish = schedule.isFinal && summary.hardConstraintScore > 0;
     const syncMetadata = {
       ...summary.syncMetadata,
       autoUnpublished: shouldAutoUnpublish,
       publishedStateBeforeSync: !!schedule.isFinal,
+      changeSummary,
     };
 
     const record = await client.schedule.update({
@@ -364,6 +448,18 @@ export const synchronizeSchedules = async (scheduleIds, client = prisma) => {
         scheduleId: schedule.id,
         eventType: NOTIFICATION_TYPES.SCHEDULE_UNPUBLISHED,
         scheduleVersion: schedule.publishedVersion ?? 0,
+        client,
+      });
+    } else if (schedule.isFinal && record.isFinal && (
+      forceUpdateNotification
+      || changeSummary.changedAssignments > 0
+      || changeSummary.addedAssignments > 0
+      || changeSummary.removedAssignments > 0
+    )) {
+      await createSchedulePublicationNotifications({
+        scheduleId: schedule.id,
+        eventType: NOTIFICATION_TYPES.SCHEDULE_UPDATED,
+        scheduleVersion: toUpdateNotificationVersion(record.updatedAt),
         client,
       });
     }

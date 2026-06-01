@@ -12,6 +12,16 @@ export const updateSettings = catchAsync(async (req, res) => {
   sendResponse(res, 200, 'Settings updated', result);
 });
 
+export const getProfile = catchAsync(async (req, res) => {
+  const result = await service.getProfile(req.user);
+  sendResponse(res, 200, 'Profile retrieved', result);
+});
+
+export const updateProfile = catchAsync(async (req, res) => {
+  const result = await service.updateProfile(req.user, req.body);
+  sendResponse(res, 200, 'Profile updated', result);
+});
+
 export const changePassword = catchAsync(async (req, res) => {
   const result = await service.changePassword(req.user, req.body);
   sendResponse(res, 200, 'Password changed successfully', result);

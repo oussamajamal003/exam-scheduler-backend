@@ -12,8 +12,26 @@ import {
 } from '../schedules/scheduleNameService.js';
 
 const DEFAULT_EXAM_DURATION = 120;
-const PROCTOR_RATIO = 20; // 1 proctor per 20 students
 const MAX_STUDENT_EXAMS_PER_DAY = 2;
+const DEFAULT_MAX_PROCTOR_ASSIGNMENTS_PER_DAY = 2;
+
+const UNLIMITED_DAILY_LOAD = 999;
+const resetSchedulingState = async () => {
+  _optimizationCache.clear();
+};
+
+const getEffectiveExamDuration = (examDuration = null) => (
+  examDuration ?? DEFAULT_EXAM_DURATION
+);
+
+const computeRequiredProctors = (studentCount) => {
+  const count = Number(studentCount ?? 0);
+
+  if (!Number.isFinite(count) || count <= 0) return 1;
+  return Math.max(1, Math.ceil(count / 20));
+};
+
+const getRequiredProctorsFromCount = (studentCount) => computeRequiredProctors(studentCount);
 const LOCAL_SEARCH_CANDIDATE_LIMIT = 6;
 const LOCAL_SEARCH_MAX_PASSES = 4;
 const LOCAL_SEARCH_SWAP_EXAM_POOL = 12;
@@ -53,7 +71,7 @@ const QUALITY_WEIGHTS = {
   proctorWorkloadBalance: 0.25,
   studentSpacing: 0.20,
   examDistribution: 0.15,
-  preferredSpacing: 0.15,
+  spacingBalance: 0.15,
 };
 const HYBRID_ALGORITHM_TYPE = 'HYBRID_CONSTRAINT_BASED';
 const NO_VALID_SCHEDULE_MESSAGE = 'No valid conflict-free schedule exists for the current data/resources.';
@@ -101,8 +119,7 @@ const _cacheSet = (cache, key, data, ttl) => cache.set(key, { data, expiresAt: D
 const _cacheDel = (cache, key) => cache.delete(key);
 
 const getRequiredProctorCount = (studentCount) => {
-  if (studentCount <= 0) return 1;
-  return Math.ceil(studentCount / PROCTOR_RATIO);
+  return getRequiredProctorsFromCount(studentCount);
 };
 const getRequiredProctorsForExam = (exam) => (
   exam.requiredProctors ?? getRequiredProctorCount(exam.studentCount ?? 0)
@@ -301,7 +318,7 @@ const getStaticFeasibleOptionCount = ({ exam, timeSlots, proctorsBySlotId, total
 
 const addExamFeasibilityStats = ({ exams, timeSlots, proctorsBySlotId, totalRoomCapacity }) => exams.map((exam) => ({
   ...exam,
-  resourceDemand: exam.requiredSeats + (getRequiredProctorsForExam(exam) * PROCTOR_RATIO),
+  resourceDemand: exam.requiredSeats + (getRequiredProctorsForExam(exam) * 20),
   feasibleTimeSlotCount: getStaticFeasibleTimeSlotCount({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }),
   feasibleOptionCount: getStaticFeasibleOptionCount({ exam, timeSlots, proctorsBySlotId, totalRoomCapacity }),
 }));
@@ -398,7 +415,7 @@ const addExamPriorityBands = (exams) => {
     const universityWideShared = isUniversityWideSharedCourse(exam, allProgramIds.size);
     const highResourceDemand = (exam.resourceDemand ?? 0) >= highResourceThreshold
       || getRequiredProctorsForExam(exam) >= highProctorThreshold
-      || (exam.duration ?? DEFAULT_EXAM_DURATION) >= 180;
+      || getEffectiveExamDuration(exam.duration) >= 180;
 
     const inferredPriorityScore = [
       largeStudentCount ? 2 : 0,
@@ -469,7 +486,7 @@ const compareExamsPriorityFirst = (a, b) => (
 
 const compareExamsShortestFirst = (a, b) => (
   comparePriorityBands(a, b)
-  || (a.duration ?? DEFAULT_EXAM_DURATION) - (b.duration ?? DEFAULT_EXAM_DURATION)
+  || getEffectiveExamDuration(a.duration) - getEffectiveExamDuration(b.duration)
   || a.conflictCount - b.conflictCount
   || a.studentCount - b.studentCount
   || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
@@ -495,7 +512,7 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
       section: offering.section,
       priority: offering.priority ?? 0,
       difficulty: offering.difficulty ?? 0,
-      duration: exam.duration ?? DEFAULT_EXAM_DURATION,
+      duration: getEffectiveExamDuration(exam.duration),
       expectedStudents,
       studentCount,
       requiredSeats: Math.max(studentCount, expectedStudents, 1),
@@ -516,7 +533,7 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
   const normalizedProctors = proctors.map((proctor) => ({
     id: proctor.id,
     user: proctor.user,
-    maxExamsPerDay: proctor.maxExamsPerDay ?? 2,
+    maxExamsPerDay: (proctor.maxExamsPerDay ?? DEFAULT_MAX_PROCTOR_ASSIGNMENTS_PER_DAY),
     availableTimeSlotIds: extractAvailableTimeSlotIds(proctor),
   }));
 
@@ -580,7 +597,7 @@ const ensureExamRecords = async (courseOfferings) => {
         data: {
           courseOfferingId: offering.id,
           status: 'DRAFT',
-          duration: DEFAULT_EXAM_DURATION,
+          duration: getEffectiveExamDuration(),
         },
       })),
     );
@@ -995,6 +1012,13 @@ const getSlotDurationMinutes = (slot) => {
   return Math.max(0, Math.round((slot.endTime.getTime() - slot.startTime.getTime()) / 60000));
 };
 
+const getSlotStartHour = (slot) => {
+  if (!slot?.startTime) return null;
+  const startTime = slot.startTime instanceof Date ? slot.startTime : new Date(slot.startTime);
+  if (Number.isNaN(startTime.getTime())) return null;
+  return startTime.getUTCHours();
+};
+
 const hasValidTimeSlotWindow = (slot) => {
   if (!slot?.startTime || !slot?.endTime) return false;
 
@@ -1038,7 +1062,7 @@ const hasEnrollmentConstraintSatisfied = (exam) => (
 const canSlotFitExam = (slot, exam) => {
   if (!hasValidTimeSlotWindow(slot)) return false;
   if (!isSlotWithinSemesterWindow(slot, exam)) return false;
-  return getSlotDurationMinutes(slot) >= (exam.duration ?? DEFAULT_EXAM_DURATION);
+  return getSlotDurationMinutes(slot) >= getEffectiveExamDuration(exam.duration);
 };
 
 const isValidAssignment = ({ exam, slot, room, proctor, usage, slotDayKey }) => {
@@ -1170,7 +1194,7 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     return buildConflictPayload(
       scheduleId,
       'TIME_CONSTRAINT_VIOLATION',
-      `${examLabel} requires ${exam.duration ?? DEFAULT_EXAM_DURATION} minutes, but every available time slot is shorter.`,
+      `${examLabel} requires ${getEffectiveExamDuration(exam.duration)} minutes, but every available time slot is shorter.`,
     );
   }
 
@@ -1196,7 +1220,7 @@ const buildAssignmentFailureConflict = ({ scheduleId, exam, timeSlots, sortedRoo
     return buildConflictPayload(
       scheduleId,
       'RESOURCE_UNAVAILABLE',
-      `${examLabel} has ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''} and needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} (1 per ${PROCTOR_RATIO} students), but only ${proctors.length} proctor${proctors.length !== 1 ? 's' : ''} ${proctors.length === 1 ? 'is' : 'are'} available${proctorLabel ? `: ${proctorLabel}` : ''}.`,
+      `${examLabel} has ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''} and needs ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} (1 per 20 students), but only ${proctors.length} proctor${proctors.length !== 1 ? 's' : ''} ${proctors.length === 1 ? 'is' : 'are'} available${proctorLabel ? `: ${proctorLabel}` : ''}.`,
     );
   }
 
@@ -1701,7 +1725,7 @@ const buildQualitySuggestions = (metrics) => {
   if (metrics.examDistribution < 75) {
     suggestions.push('Spread exams more evenly across exam days to reduce daily peaks.');
   }
-  if (metrics.preferredSpacing < 75) {
+  if (metrics.spacingBalance < 75) {
     suggestions.push('Increase one-day-or-more gaps between exams sharing students.');
   }
 
@@ -1746,7 +1770,7 @@ const calculateStudentSpacingMetrics = (studentSlotEntries) => {
     sameDayPairCount,
     backToBackPairCount,
     studentSpacing: totalPairs === 0 ? 100 : clampScore(100 - (spacingPenalty / totalPairs)),
-    preferredSpacing: totalPairs === 0 ? 100 : clampScore((preferredGapSatisfied / totalPairs) * 100),
+    spacingBalance: totalPairs === 0 ? 100 : clampScore((preferredGapSatisfied / totalPairs) * 100),
   };
 };
 
@@ -1829,7 +1853,7 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
     proctorWorkloadBalance: roundMetric(proctorBalance.proctorWorkloadBalance),
     studentSpacing: roundMetric(spacingMetrics.studentSpacing),
     examDistribution: roundMetric(examDistribution),
-    preferredSpacing: roundMetric(spacingMetrics.preferredSpacing),
+    spacingBalance: roundMetric(spacingMetrics.spacingBalance),
     centerProximity: roundMetric(centerProximity),
   };
   const score = roundMetric(
@@ -1837,7 +1861,7 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
     + (metrics.proctorWorkloadBalance * QUALITY_WEIGHTS.proctorWorkloadBalance)
     + (metrics.studentSpacing * QUALITY_WEIGHTS.studentSpacing)
     + (metrics.examDistribution * QUALITY_WEIGHTS.examDistribution)
-    + (metrics.preferredSpacing * QUALITY_WEIGHTS.preferredSpacing),
+    + (metrics.spacingBalance * QUALITY_WEIGHTS.spacingBalance),
   );
 
   const weakAreas = Object.entries(metrics)
@@ -2298,7 +2322,7 @@ const getWeakMetricWeights = (metrics = {}) => ({
   proctorWorkloadBalance: metrics.proctorWorkloadBalance < 50 ? 5 : metrics.proctorWorkloadBalance < 78 ? 2.8 : 0.9,
   studentSpacing: metrics.studentSpacing < 78 ? 2.35 : 1,
   examDistribution: metrics.examDistribution < 78 ? 2 : 0.85,
-  preferredSpacing: metrics.preferredSpacing < 78 ? 2.15 : 0.9,
+  spacingBalance: metrics.spacingBalance < 78 ? 2.15 : 0.9,
 });
 
 const getFocusedMetricWeights = (metrics = {}, focusMetric = null) => {
@@ -2307,15 +2331,15 @@ const getFocusedMetricWeights = (metrics = {}, focusMetric = null) => {
   return {
     ...weights,
     [focusMetric]: Math.max(weights[focusMetric] ?? 1, 3),
-    ...(focusMetric === 'studentSpacing' ? { preferredSpacing: Math.max(weights.preferredSpacing, 2.8) } : {}),
-    ...(focusMetric === 'preferredSpacing' ? { studentSpacing: Math.max(weights.studentSpacing, 2.8) } : {}),
+    ...(focusMetric === 'studentSpacing' ? { spacingBalance: Math.max(weights.spacingBalance, 2.8) } : {}),
+    ...(focusMetric === 'spacingBalance' ? { studentSpacing: Math.max(weights.studentSpacing, 2.8) } : {}),
   };
 };
 
 const getMetricRepairOrder = (metrics = {}) => [
   ['proctorWorkloadBalance', metrics.proctorWorkloadBalance ?? 100],
   ['studentSpacing', metrics.studentSpacing ?? 100],
-  ['preferredSpacing', metrics.preferredSpacing ?? 100],
+  ['spacingBalance', metrics.spacingBalance ?? 100],
   ['examDistribution', metrics.examDistribution ?? 100],
   ['roomUtilization', metrics.roomUtilization ?? 100],
 ]
@@ -2349,7 +2373,7 @@ const scoreExamOptimizationPriority = ({ exam, score, weakWeights }) => {
   return roundMetric(
     ((score?.softPenalty ?? 0) * 1.35)
     + ((components.proctorWorkload ?? 0) * weakWeights.proctorWorkloadBalance)
-    + ((components.studentDailyLoad ?? 0) * (weakWeights.studentSpacing + weakWeights.preferredSpacing) * 0.6)
+    + ((components.studentDailyLoad ?? 0) * (weakWeights.studentSpacing + weakWeights.spacingBalance) * 0.6)
     + ((components.unusedRoomSeats ?? 0) * weakWeights.roomUtilization)
     + ((components.roomCount ?? 0) * 0.5)
     + (exam.studentIds.length * 0.015),
@@ -2372,7 +2396,7 @@ const estimateCandidateMoveImpact = ({ candidate, currentScore, draftIndexes, we
   return roundMetric(
     (((currentScore?.softPenalty ?? 0) - candidate.softPenalty) * 1.4)
     + (((currentComponents.proctorWorkload ?? 0) - (candidateComponents.proctorWorkload ?? 0)) * weakWeights.proctorWorkloadBalance)
-    + (((currentComponents.studentDailyLoad ?? 0) - (candidateComponents.studentDailyLoad ?? 0)) * (weakWeights.studentSpacing + weakWeights.preferredSpacing) * 0.7)
+    + (((currentComponents.studentDailyLoad ?? 0) - (candidateComponents.studentDailyLoad ?? 0)) * (weakWeights.studentSpacing + weakWeights.spacingBalance) * 0.7)
     + (((currentComponents.unusedRoomSeats ?? 0) - (candidateComponents.unusedRoomSeats ?? 0)) * weakWeights.roomUtilization)
     + (((currentComponents.roomCount ?? 0) - (candidateComponents.roomCount ?? 0)) * 0.7)
     + (distributionGain * weakWeights.examDistribution),
@@ -3620,6 +3644,7 @@ const fmtDate = (d) =>
   new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 export const validateInput = async (data) => {
+  await resetSchedulingState();
   const { normalized, semester } = await fetchSchedulingData(data.semesterId);
   const { groups: g, warnings, constraintPreview } = await collectPreValidationState({
     normalized,
@@ -3637,6 +3662,7 @@ export const validateInput = async (data) => {
 };
 
 export const optimizeScheduling = async (data) => {
+  await resetSchedulingState();
   const { normalized, semester } = await fetchSchedulingData(data.semesterId);
   const baseState = await collectPreValidationState({ normalized, semester, includeConstraintPreview: false });
 
@@ -3703,6 +3729,7 @@ export const optimizeScheduling = async (data) => {
 };
 
 export const generateSchedule = async (data) => {
+  await resetSchedulingState();
   const { semesterId, scheduleName } = data;
   const normalizedScheduleName = await assertScheduleNameAvailable(prisma, scheduleName);
 
@@ -3787,7 +3814,7 @@ export const generateSchedule = async (data) => {
         data: {
           courseOfferingId: exam.courseOfferingId,
           status: 'DRAFT',
-          duration: exam.duration ?? DEFAULT_EXAM_DURATION,
+          duration: getEffectiveExamDuration(exam.duration),
         },
       });
       draftExamIdToPersistedId.set(exam.id, createdExam.id);
@@ -4310,6 +4337,19 @@ export const publishSchedule = async (scheduleId, payload = {}) => {
   }
 
   const semesterId = await getScheduleSemesterId(scheduleId);
+  const semester = await prisma.semester.findUnique({
+    where: { id: semesterId },
+    select: { id: true, isActive: true },
+  });
+
+  if (!semester) {
+    throw new AppError('Semester not found', 404);
+  }
+
+  if (!semester.isActive) {
+    throw new AppError('Cannot publish a schedule from an inactive semester.', 400);
+  }
+
   await validatePublishedSchedulePeriod({ scheduleId, examPeriod, semesterId });
 
   const analysis = await getScheduleAnalysis(scheduleId);

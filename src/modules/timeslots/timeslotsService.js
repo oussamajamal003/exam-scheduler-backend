@@ -255,7 +255,7 @@ export const update = async (id, data) => {
   return prisma.$transaction(async (tx) => {
     const scheduleIds = await findImpactedScheduleIds({ dependency: 'timeSlot', ids: [id] }, tx);
     const updated = await tx.timeSlot.update({ where: { id }, data: payload, include: timeSlotInclude });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return updated;
   });
 };

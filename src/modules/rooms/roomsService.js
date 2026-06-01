@@ -123,7 +123,7 @@ export const update = async (id, data) => {
     }
 
     const room = await tx.room.update({ where: { id }, data, include: roomInclude });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return normalizeRoom(room);
   });
 };

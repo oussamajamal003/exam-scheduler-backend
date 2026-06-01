@@ -6,10 +6,16 @@ import { createExamStatusChangeNotifications } from '../notifications/notificati
 import { synchronizeSchedules } from '../schedules/scheduleSyncService.js';
 
 const MAX_STUDENT_EXAMS_PER_DAY = 2;
-const PROCTOR_RATIO = 20;
 const ASSIGNMENT_STATUSES = ['DRAFT', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const PUBLISHED_ASSIGNMENT_STATUSES = ['SCHEDULED', 'COMPLETED', 'CANCELLED'];
 const NO_MATCH_ASSIGNMENT_ID = '00000000-0000-0000-0000-000000000000';
+
+const computeRequiredProctors = (studentCount) => {
+  const count = Number(studentCount ?? 0);
+
+  if (!Number.isFinite(count) || count <= 0) return 1;
+  return Math.max(1, Math.ceil(count / 20));
+};
 
 // -------------------- response shape --------------------
 //
@@ -88,6 +94,8 @@ const ensureScheduleExists = async (scheduleId) => {
   if (!schedule) throw new AppError('Schedule not found', 404);
   return schedule;
 };
+
+const getCurrentDefaultExamDuration = async () => 120;
 
 // Mirror the frontend display rule:
 //   draft schedule  → every assignment is DRAFT
@@ -410,7 +418,7 @@ const validateRequiredProctorCount = async ({ scheduleId, assignmentId, examId, 
   const enrolledCount = await prisma.registration.count({
     where: { courseOffering: { exams: { some: { id: examId } } } },
   });
-  const requiredProctors = Math.max(1, Math.ceil(enrolledCount / PROCTOR_RATIO));
+  const requiredProctors = computeRequiredProctors(enrolledCount);
   const siblingAssignments = await prisma.examAssignment.findMany({
     where: {
       scheduleId,
@@ -664,7 +672,7 @@ const calculateCandidateScheduleQuality = ({ candidate, otherAssignments }) => {
   };
 };
 
-const assertCandidateGroupAgainstFullSchedule = ({ candidates, otherAssignments }) => {
+const assertCandidateGroupAgainstFullSchedule = async ({ candidates, otherAssignments }) => {
   if (!candidates.length) throw new AppError('No assignment rows available for update.', 400);
 
   const candidateExamId = candidates[0].examId;
@@ -674,7 +682,7 @@ const assertCandidateGroupAgainstFullSchedule = ({ candidates, otherAssignments 
     throw new AppError('Each assignment row must have a different proctor selected.', 400);
   }
 
-  const requiredProctors = Math.max(1, Math.ceil(candidateStudentIds.size / PROCTOR_RATIO));
+  const requiredProctors = computeRequiredProctors(candidateStudentIds.size);
   if (new Set(candidateProctorIds).size < requiredProctors) {
     throw new AppError(
       `Selected assignment would provide ${new Set(candidateProctorIds).size} proctor${new Set(candidateProctorIds).size === 1 ? '' : 's'}, but this exam requires ${requiredProctors} based on ${candidateStudentIds.size} enrolled student${candidateStudentIds.size === 1 ? '' : 's'}.`,
@@ -1158,7 +1166,7 @@ export const update = async (scheduleId, assignmentId, payload) => {
       throw new AppError('Select one proctor for each existing assignment row in this exam.', 400);
     }
 
-    const effectiveExamDuration = examPatch?.duration ?? existing.exam?.duration ?? 120;
+    const effectiveExamDuration = examPatch?.duration ?? existing.exam?.duration ?? await getCurrentDefaultExamDuration();
     const effectiveTimeSlotIds = groupedAssignments.map((assignment) => timeSlotId ?? assignment.timeSlotId);
     const effectiveRoomIds = groupedAssignments.map((assignment) => roomId ?? assignment.roomId);
 
@@ -1206,7 +1214,7 @@ export const update = async (scheduleId, assignmentId, payload) => {
     }
 
     const otherAssignments = await loadOtherScheduleAssignmentsForValidation(scheduleId, groupedAssignmentIds);
-    assertCandidateGroupAgainstFullSchedule({ candidates: candidateAssignments, otherAssignments });
+    await assertCandidateGroupAgainstFullSchedule({ candidates: candidateAssignments, otherAssignments });
     const candidateQuality = calculateCandidateGroupScheduleQuality({ candidates: candidateAssignments, otherAssignments });
 
     await prisma.$transaction(async (tx) => {
@@ -1284,7 +1292,7 @@ export const update = async (scheduleId, assignmentId, payload) => {
     examId: existing.examId,
   };
 
-  const effectiveExamDuration = examPatch?.duration ?? existing.exam?.duration ?? 120;
+  const effectiveExamDuration = examPatch?.duration ?? existing.exam?.duration ?? await getCurrentDefaultExamDuration();
   const [room, proctor, timeSlot] = await Promise.all([
     validateRoomStatus(effective.roomId),
     loadProctorForConstraintCheck(effective.proctorId),

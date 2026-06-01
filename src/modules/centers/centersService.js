@@ -107,7 +107,7 @@ export const update = async (id, data) => {
       data: centerData,
       include: centerInclude,
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return normalizeCenter(center);
   });
 };

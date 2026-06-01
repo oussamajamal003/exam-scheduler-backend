@@ -29,11 +29,13 @@ const serializeUser = (user) => ({
 export const ensureAdminUsers = async () => {
   for (const [name, email, password] of adminUsers) {
     const hashedPassword = await bcrypt.hash(password, 10);
+    const normalizedEmail = email.toLowerCase();
 
     await prisma.user.upsert({
-      where: { email },
-      update: { name, password: hashedPassword, role: 'ADMIN' },
-      create: { name, email, password: hashedPassword, role: 'ADMIN' },
+      where: { email: normalizedEmail },
+      // Preserve any password/email changes made through settings; only seed missing admins.
+      update: { name, role: 'ADMIN' },
+      create: { name, email: normalizedEmail, password: hashedPassword, role: 'ADMIN' },
     });
   }
 };
@@ -43,9 +45,19 @@ export const loginUser = async ({ email, password }) => {
     throw new AppError('Please provide email and password', 400);
   }
 
-  const user = await UserModel.findUserByEmail(email);
+  // Normalize email: trim and lowercase for case-insensitive comparison
+  const normalizedEmail = email.trim().toLowerCase();
+  const trimmedPassword = password.trim();
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
+  const user = await UserModel.findUserByEmail(normalizedEmail);
+
+  if (!user) {
+    throw new AppError('Incorrect email or password', 401);
+  }
+
+  const isPasswordValid = await bcrypt.compare(trimmedPassword, user.password);
+  
+  if (!isPasswordValid) {
     throw new AppError('Incorrect email or password', 401);
   }
 

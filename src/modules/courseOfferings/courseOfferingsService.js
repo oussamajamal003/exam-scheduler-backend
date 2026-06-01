@@ -228,7 +228,7 @@ export const update = async (id, data) => {
       data: toCourseOfferingWriteData(normalizedData),
       include: courseOfferingInclude,
     });
-    await synchronizeSchedules(scheduleIds, tx);
+    await synchronizeSchedules(scheduleIds, tx, { forceUpdateNotification: true });
     return updated;
   });
   return normalizeCourseOffering(offering);
