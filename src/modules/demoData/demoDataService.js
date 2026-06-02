@@ -4,7 +4,7 @@ import { AppError } from '../../utils/AppError.js';
 
 const DEMO_PREFIX = 'DEMO-';
 const DEMO_PASSWORD = 'Demo12345!';
-const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL'];
+const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL', 'FEIT2027'];
 
 const departmentTemplates = [
   { name: 'Computer Science', code: 'CS' },
@@ -148,6 +148,25 @@ const datasetProfiles = {
     slotDays: 12,
     realData: true,
   },
+  FEIT2027: {
+    key: 'FEIT2027',
+    namespace: 'DEMO-FEIT-2027',
+    label: 'FEIT Spring 2027',
+    description: 'Optimization showcase dataset with FEIT-style overlap, uneven slots, and zero-hard-violation feasibility.',
+    semesterName: 'FEIT Spring 2027',
+    semesterStartDate: '2027-05-17',
+    semesterEndDate: '2027-05-23',
+    academicYear: '2026-2027',
+    studentCount: 1080,
+    proctorCount: 88,
+    centerCount: 5,
+    roomCount: 58,
+    offeringCount: 52,
+    slotDays: 5,
+    targetScale: 1,
+    maxOfferingTarget: 180,
+    feitShowcase: true,
+  },
 };
 
 // Real FEIT Spring 2026 course offerings.
@@ -186,6 +205,67 @@ const realRoomTemplates = [
   { centerCode: 'FEIT-D', name: 'Exam Hall D101', capacity: 110 },
   { centerCode: 'FEIT-D', name: 'Exam Hall D102', capacity: 90 },
   { centerCode: 'FEIT-D', name: 'Exam Hall D201', capacity: 70 },
+];
+const feitShowcaseDepartmentTemplates = [
+  { name: 'Computer Engineering', code: 'CE' },
+  { name: 'Communications Engineering', code: 'COM' },
+  { name: 'Electrical Engineering', code: 'EE' },
+  { name: 'Computer Science', code: 'CS' },
+  { name: 'Informatics', code: 'INF' },
+];
+const feitShowcaseProgramTemplates = [
+  { name: 'Computer Engineering', code: 'CE', departmentCode: 'CE' },
+  { name: 'Embedded Systems Engineering', code: 'EMB', departmentCode: 'CE' },
+  { name: 'Communications Engineering', code: 'COM', departmentCode: 'COM' },
+  { name: 'Network Engineering', code: 'NET', departmentCode: 'COM' },
+  { name: 'Electrical Engineering', code: 'EE', departmentCode: 'EE' },
+  { name: 'Control and Instrumentation Engineering', code: 'CIE', departmentCode: 'EE' },
+  { name: 'Computer Science', code: 'CS', departmentCode: 'CS' },
+  { name: 'Informatics', code: 'INF', departmentCode: 'INF' },
+];
+const feitShowcaseCenterTemplates = [
+  { code: 'NORTH', name: 'North Academic Complex', location: 'North Campus' },
+  { code: 'SOUTH', name: 'South Engineering Center', location: 'South Campus' },
+  { code: 'EAST', name: 'East Digital Labs', location: 'East Campus' },
+  { code: 'WEST', name: 'West Examination Halls', location: 'West Campus' },
+  { code: 'CENTRAL', name: 'Central Learning Commons', location: 'Main Campus' },
+];
+const feitShowcaseRoomCapacities = {
+  NORTH: [28, 32, 36, 44, 52, 60, 72, 84, 128, 168, 220, 240],
+  SOUTH: [24, 30, 34, 42, 48, 56, 68, 80, 124, 164, 210, 230],
+  EAST: [22, 28, 32, 40, 46, 54, 66, 76, 118, 152, 200, 220],
+  WEST: [26, 30, 36, 44, 50, 58, 70, 82, 132, 176, 225],
+  CENTRAL: [24, 30, 34, 42, 48, 56, 68, 78, 126, 166, 210],
+};
+const feitShowcaseSlotSpecs = [
+  ['2027-05-17', '09:00', '11:00'],
+  ['2027-05-17', '13:00', '15:00'],
+  ['2027-05-18', '08:00', '10:00'],
+  ['2027-05-18', '10:15', '12:15'],
+  ['2027-05-18', '12:30', '14:30'],
+  ['2027-05-18', '14:45', '16:45'],
+  ['2027-05-18', '17:00', '19:00'],
+  ['2027-05-18', '19:15', '21:15'],
+  ['2027-05-19', '08:00', '10:00'],
+  ['2027-05-19', '10:05', '12:05'],
+  ['2027-05-19', '12:10', '14:10'],
+  ['2027-05-19', '14:15', '16:15'],
+  ['2027-05-19', '16:20', '18:20'],
+  ['2027-05-19', '18:25', '20:25'],
+  ['2027-05-20', '08:30', '10:30'],
+  ['2027-05-20', '10:45', '12:45'],
+  ['2027-05-20', '13:00', '15:00'],
+  ['2027-05-20', '15:15', '17:15'],
+  ['2027-05-20', '17:30', '19:30'],
+  ['2027-05-21', '08:30', '10:30'],
+  ['2027-05-21', '10:45', '12:45'],
+  ['2027-05-21', '13:00', '15:00'],
+  ['2027-05-22', '09:00', '11:00'],
+  ['2027-05-22', '11:15', '13:15'],
+  ['2027-05-22', '14:00', '16:00'],
+  ['2027-05-22', '16:15', '18:15'],
+  ['2027-05-23', '09:00', '11:00'],
+  ['2027-05-23', '11:15', '13:15'],
 ];
 const realOfferings = [
   { baseCode: 'AUT202L', section: 'A', title: 'Automation Lab', credits: 2, instructor: 'Ibrahim Mallat', day: 'TH', time: '13:00-16:00', type: 'LAB', hasExam: false, programCode: 'EE', cohorts: ['EE', 'CCE'], target: 18, duration: 180 },
@@ -238,6 +318,157 @@ const buildProctorEmail = (datasetKey, index) => `demo.${datasetKey.toLowerCase(
 const buildStudentUniversityId = (namespace, index) => `${namespace}-STU-${String(index + 1).padStart(4, '0')}`;
 const buildDatasetScopedLabel = (value, profile) => `${value} (${profile.label})`;
 const allDemoSemesterNames = Object.values(datasetProfiles).map((profile) => profile.semesterName);
+
+const buildFeitSpring2027ProctorAvailability = (timeSlots, index) => {
+  const slotMeta = timeSlots.map((slot, slotIndex) => ({
+    slotId: slot.id,
+    slotIndex,
+    weekday: new Date(slot.date ?? slot.startTime).getUTCDay(),
+    startHour: new Date(slot.startTime).getUTCHours(),
+  }));
+
+  return slotMeta.filter((meta) => {
+    if (index < 28) {
+      const blockedFridayLate = meta.weekday === 5 && meta.startHour >= 11;
+      const saturdayWindow = meta.weekday === 6 && meta.startHour < 18;
+      const sundayWindow = meta.weekday === 0 && meta.startHour < 18;
+      return (!blockedFridayLate || saturdayWindow || sundayWindow) && (meta.slotIndex + index) % 7 !== 0;
+    }
+    if (index < 62) {
+      const peakDays = meta.weekday >= 2 && meta.weekday <= 4;
+      const mondayWindow = meta.weekday === 1 && meta.startHour < 12 && index % 2 === 0;
+      const fridayWindow = meta.weekday === 5 && meta.startHour < 11;
+      const fridayRecoveryWindow = meta.weekday === 5 && meta.startHour >= 11 && index % 3 === 0;
+      const saturdayWindow = meta.weekday === 6 && index % 2 === 0;
+      const sundayWindow = meta.weekday === 0 && index % 2 === 0;
+      return (peakDays || mondayWindow || fridayWindow || fridayRecoveryWindow || saturdayWindow || sundayWindow) && (meta.slotIndex + index) % 5 !== 0;
+    }
+    const preferredDay = ((index - 62) % 5) + 1;
+    const narrowWindow = meta.weekday === preferredDay && meta.startHour < 15;
+    const backupWindow = meta.weekday === 3 && meta.startHour < 12 && index % 2 === 0;
+    const fridayRecoveryWindow = meta.weekday === 5 && meta.startHour >= 11 && index % 4 === 0;
+    const saturdayWindow = meta.weekday === 6 && index % 3 === 0;
+    const sundayWindow = meta.weekday === 0 && index % 3 === 0;
+    return (narrowWindow || backupWindow || fridayRecoveryWindow || saturdayWindow || sundayWindow) && (meta.slotIndex + index) % 9 !== 0;
+  }).map((meta) => ({ timeSlotId: meta.slotId }));
+};
+
+const buildFeitSpring2027OfferingPlans = (profile) => {
+  const offerings = [];
+  const allPrograms = feitShowcaseProgramTemplates.map((program) => `${profile.namespace}-PROG-${program.code}`);
+  const coreTitlesByProgram = {
+    CE: ['Digital Logic and Computer Architecture', 'Microprocessor Systems', 'Computer Organization', 'Embedded Firmware Design'],
+    EMB: ['Embedded Systems Integration', 'IoT Hardware Platforms', 'VLSI Design Fundamentals', 'Real-Time Operating Systems'],
+    COM: ['Communication Theory', 'Digital Signal Processing', 'Wireless Networks', 'Antenna and Wave Propagation'],
+    NET: ['Network Routing and Switching', 'Signal Processing Applications', 'Mobile Communications', 'RF Systems Laboratory'],
+    EE: ['Power Systems Analysis', 'Electrical Machines', 'Protection and Switching', 'Power Electronics'],
+    CIE: ['Control Systems', 'Instrumentation and Sensors', 'Industrial Automation', 'Mechatronic Systems'],
+    CS: ['Data Structures and Algorithms', 'Operating Systems', 'Database Systems', 'Software Engineering'],
+    INF: ['Programming Fundamentals', 'Human-Computer Interaction', 'Data Analytics Foundations', 'Information Systems'],
+  };
+  const cohortMap = {
+    CE: ['CE', 'EMB', 'CS'],
+    EMB: ['EMB', 'CE', 'CS'],
+    COM: ['COM', 'NET'],
+    NET: ['NET', 'COM'],
+    EE: ['EE', 'CIE', 'NET'],
+    CIE: ['CIE', 'EE', 'NET'],
+    CS: ['CS', 'INF', 'CE'],
+    INF: ['INF', 'CS', 'COM'],
+  };
+  const sharedCourseSpecs = [
+    { title: 'Engineering Mathematics II', target: 166, cohorts: allPrograms, programCode: 'CS' },
+    { title: 'Probability and Statistics for Engineers', target: 158, cohorts: allPrograms, programCode: 'INF' },
+    { title: 'Research Methods and Technical Writing', target: 142, cohorts: allPrograms, programCode: 'CS' },
+    { title: 'Ethics and Professional Practice', target: 136, cohorts: allPrograms, programCode: 'INF' },
+    { title: 'Optimization and Decision Support', target: 154, cohorts: allPrograms, programCode: 'CE' },
+    { title: 'Numerical Methods for Engineers', target: 146, cohorts: ['CE', 'EMB', 'EE', 'CIE', 'CS', 'INF'].map((code) => `${profile.namespace}-PROG-${code}`), programCode: 'EE' },
+    { title: 'Project Management for Engineering Teams', target: 134, cohorts: allPrograms, programCode: 'CS' },
+    { title: 'Entrepreneurship and Innovation', target: 128, cohorts: allPrograms, programCode: 'INF' },
+    { title: 'Engineering Economics', target: 138, cohorts: ['EE', 'CIE', 'CE', 'COM', 'NET'].map((code) => `${profile.namespace}-PROG-${code}`), programCode: 'EE' },
+    { title: 'Applied Linear Algebra', target: 150, cohorts: allPrograms, programCode: 'CE' },
+    { title: 'Scientific Computing', target: 126, cohorts: ['CS', 'INF', 'CE', 'EMB', 'COM'].map((code) => `${profile.namespace}-PROG-${code}`), programCode: 'CS' },
+    { title: 'Sustainability in Engineering', target: 122, cohorts: allPrograms, programCode: 'INF' },
+  ];
+  const electiveCourseSpecs = [
+    { title: 'Mobile App Development Studio', target: 34, cohorts: ['CS', 'INF'], programCode: 'CS' },
+    { title: 'Robotics and Autonomous Systems', target: 46, cohorts: ['CE', 'EMB', 'CIE'], programCode: 'CE' },
+    { title: 'Smart Grid Applications', target: 28, cohorts: ['EE', 'CIE'], programCode: 'EE' },
+    { title: 'Secure Cloud Infrastructure', target: 52, cohorts: ['CS', 'INF', 'COM'], programCode: 'CS' },
+    { title: 'Biomedical Signal Processing Concepts', target: 32, cohorts: ['COM', 'CIE', 'NET'], programCode: 'COM' },
+    { title: 'Computer Vision for Engineers', target: 58, cohorts: ['CS', 'INF', 'CE'], programCode: 'CS' },
+    { title: 'IoT Systems Studio', target: 38, cohorts: ['CE', 'EMB', 'INF'], programCode: 'CE' },
+    { title: 'Advanced Human-Computer Interaction', target: 26, cohorts: ['CS', 'INF'], programCode: 'INF' },
+  ];
+  const coreTargets = [108, 86, 68, 48];
+  const coreDayPatterns = [
+    { day: 'MW', time: '08:00-09:30' },
+    { day: 'TTH', time: '10:00-11:30' },
+    { day: 'MW', time: '13:00-14:30' },
+    { day: 'TTH', time: '15:00-16:30' },
+  ];
+
+  feitShowcaseProgramTemplates.forEach((program, programIndex) => {
+    coreTitlesByProgram[program.code].forEach((title, courseIndex) => {
+      const pattern = coreDayPatterns[courseIndex % coreDayPatterns.length];
+      const cohorts = program.code === 'NET' && courseIndex >= 2
+        ? [`${profile.namespace}-PROG-NET`]
+        : program.code === 'COM' && courseIndex === 3
+          ? [`${profile.namespace}-PROG-COM`]
+          : cohortMap[program.code].map((code) => `${profile.namespace}-PROG-${code}`);
+      offerings.push({
+        code: `${profile.namespace}-${program.code}C${courseIndex + 1}`,
+        title,
+        programCode: `${profile.namespace}-PROG-${program.code}`,
+        cohorts,
+        target: coreTargets[courseIndex] - (programIndex % 2) * 4 - (program.code === 'NET' && courseIndex >= 2 ? 24 : 0),
+        duration: 120,
+        priority: 88 - courseIndex * 5,
+        difficulty: 7 - (courseIndex === 3 ? 2 : 0),
+        instructor: instructorNames[(programIndex * 4 + courseIndex) % instructorNames.length],
+        day: pattern.day,
+        time: pattern.time,
+        notes: 'FEIT Spring 2027 core offering',
+      });
+    });
+  });
+
+  sharedCourseSpecs.forEach((spec, index) => {
+    offerings.push({
+      code: `${profile.namespace}-S${String(index + 1).padStart(2, '0')}`,
+      title: spec.title,
+      programCode: `${profile.namespace}-PROG-${spec.programCode}`,
+      cohorts: spec.cohorts,
+      target: spec.target,
+      duration: 120,
+      priority: 82,
+      difficulty: 6,
+      instructor: instructorNames[(index + 5) % instructorNames.length],
+      day: ['MW', 'TTH', 'MW', 'TTH', 'F', 'MW', 'TTH', 'MW', 'TTH', 'MW', 'TTH', 'F'][index],
+      time: ['09:00-10:30', '10:45-12:15', '12:30-14:00', '14:15-15:45', '08:30-10:00', '10:15-11:45', '13:00-14:30', '15:00-16:30', '08:00-09:30', '10:00-11:30', '13:30-15:00', '15:15-16:45'][index],
+      notes: 'FEIT Spring 2027 shared course',
+    });
+  });
+
+  electiveCourseSpecs.forEach((spec, index) => {
+    offerings.push({
+      code: `${profile.namespace}-E${String(index + 1).padStart(2, '0')}`,
+      title: spec.title,
+      programCode: `${profile.namespace}-PROG-${spec.programCode}`,
+      cohorts: spec.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
+      target: spec.target,
+      duration: 120,
+      priority: 60,
+      difficulty: 4,
+      instructor: instructorNames[(index + 9) % instructorNames.length],
+      day: ['MW', 'TTH', 'F', 'MW', 'TTH', 'F', 'MW', 'TTH'][index],
+      time: ['08:30-10:00', '10:15-11:45', '12:00-13:30', '13:45-15:15', '15:30-17:00', '17:15-18:45', '09:00-10:30', '11:00-12:30'][index],
+      notes: 'FEIT Spring 2027 elective course',
+    });
+  });
+
+  return offerings;
+};
 
 const buildDatasetSemesterWhere = (profile) => ({
   OR: [
@@ -331,18 +562,18 @@ export const getDemoDatasetKeyForSemester = (semester) => {
 };
 
 const buildDepartmentSpecs = (profile) => {
-  const templates = profile.realData ? realDepartmentTemplates : departmentTemplates;
+  const templates = profile.feitShowcase ? feitShowcaseDepartmentTemplates : profile.realData ? realDepartmentTemplates : departmentTemplates;
   return templates.map((item) => ({
     code: `${profile.namespace}-DEPT-${item.code}`,
-    name: profile.realData ? item.name : `${item.name} (${profile.label})`,
+    name: profile.realData || profile.feitShowcase ? item.name : `${item.name} (${profile.label})`,
   }));
 };
 
 const buildProgramSpecs = (profile) => {
-  const templates = profile.realData ? realProgramTemplates : programTemplates;
+  const templates = profile.feitShowcase ? feitShowcaseProgramTemplates : profile.realData ? realProgramTemplates : programTemplates;
   return templates.map((item) => ({
     code: `${profile.namespace}-PROG-${item.code}`,
-    name: profile.realData ? item.name : `${item.name} (${profile.label})`,
+    name: profile.realData || profile.feitShowcase ? item.name : `${item.name} (${profile.label})`,
     departmentCode: `${profile.namespace}-DEPT-${item.departmentCode}`,
   }));
 };
@@ -369,6 +600,7 @@ const buildRealOfferingPlans = (profile) => realOfferings.map((offering) => ({
 }));
 
 const buildOfferingPlans = (profile) => {
+  if (profile.feitShowcase) return buildFeitSpring2027OfferingPlans(profile);
   if (profile.realData) return buildRealOfferingPlans(profile);
   return Array.from({ length: profile.offeringCount }, (_, index) => {
   const template = courseTemplates[index % courseTemplates.length];
@@ -393,6 +625,13 @@ const buildOfferingPlans = (profile) => {
 };
 
 const buildCenterSpecs = (profile) => {
+  if (profile.feitShowcase) {
+    return feitShowcaseCenterTemplates.map((center) => ({
+      code: `${profile.namespace}-CENTER-${center.code}`,
+      name: center.name,
+      location: center.location,
+    }));
+  }
   if (profile.realData) {
     return realCenterTemplates.map((center) => ({
       code: `${profile.namespace}-CENTER-${center.code}`,
@@ -408,6 +647,16 @@ const buildCenterSpecs = (profile) => {
 };
 
 const buildRoomPlans = (profile, centers) => {
+  if (profile.feitShowcase) {
+    return centers.flatMap((center) => {
+      const centerCode = center.code.split('-CENTER-')[1];
+      return (feitShowcaseRoomCapacities[centerCode] ?? []).map((capacity, index) => ({
+        centerCode: center.code,
+        name: `${centerCode} Hall ${String(index + 1).padStart(2, '0')}`,
+        capacity,
+      }));
+    });
+  }
   if (profile.realData) {
     return realRoomTemplates.map((room) => ({
       centerCode: `${profile.namespace}-CENTER-${room.centerCode}`,
@@ -436,6 +685,7 @@ const buildRoomPlans = (profile, centers) => {
 };
 
 const buildTimeSlotSpecs = (profile) => {
+  if (profile.feitShowcase) return feitShowcaseSlotSpecs;
   const specs = [];
   const baseDate = new Date(`${profile.semesterStartDate}T00:00:00.000Z`);
 
@@ -564,13 +814,19 @@ const deleteScopedAssignmentsWithTx = async (tx, { scheduleWhere, examWhere, roo
 const clearDemoDatasetWithTx = async (tx, datasetKey) => {
   const scope = buildDatasetScope(datasetKey);
 
-  await deleteScopedAssignmentsWithTx(tx, {
+  const scopedAssignments = await deleteScopedAssignmentsWithTx(tx, {
     scheduleWhere: { createdBy: scope.createdBy },
     examWhere: { courseOffering: { course: { code: { startsWith: scope.namespace } } } },
     roomWhere: { center: { code: { startsWith: scope.centerCodePrefix } } },
     proctorWhere: { user: { email: { startsWith: scope.proctorEmailPrefix } } },
     timeSlotWhere: { createdBy: scope.createdBy },
   });
+
+  const ownedScheduleIds = new Set(scopedAssignments.scheduleIds);
+  const foreignScheduleIds = scopedAssignments.assignmentScheduleIds.filter((scheduleId) => !ownedScheduleIds.has(scheduleId));
+  if (foreignScheduleIds.length > 0) {
+    throw new AppError('Cannot delete demo dataset. Delete related schedules first from Schedule Versions.', 409);
+  }
 
   await tx.registration.deleteMany({ where: { courseOffering: { course: { code: { startsWith: scope.namespace } } } } });
   await tx.exam.deleteMany({ where: { courseOffering: { course: { code: { startsWith: scope.namespace } } } } });
@@ -681,6 +937,7 @@ const createSemester = async (tx, profile) => {
       startDate: toDate(profile.semesterStartDate, '00:00'),
       endDate: toDate(profile.semesterEndDate, '23:59'),
       academicYear: profile.academicYear,
+      isActive: true,
       createdBy: buildCreatedBy(profile.key),
     },
   });
@@ -829,15 +1086,20 @@ const createProctors = async (tx, profile, centerByCode, passwordHash, timeSlots
     const proctor = await tx.proctor.create({
       data: {
         userId: user.id,
-        department: index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
-        maxExamsPerDay: index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
+        department: profile.feitShowcase
+          ? feitShowcaseDepartmentTemplates[index % feitShowcaseDepartmentTemplates.length].name
+          : index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
+        maxExamsPerDay: profile.feitShowcase ? (index < 28 ? 3 : 2) : index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
         createdBy: buildCreatedBy(profile.key),
         updatedBy: buildCreatedBy(profile.key),
       },
     });
 
     await tx.proctorAvailability.createMany({
-      data: timeSlots.map((slot) => ({ proctorId: proctor.id, timeSlotId: slot.id })),
+      data: (profile.feitShowcase
+        ? buildFeitSpring2027ProctorAvailability(timeSlots, index)
+        : timeSlots.map((slot) => ({ timeSlotId: slot.id }))
+      ).map((entry) => ({ proctorId: proctor.id, timeSlotId: entry.timeSlotId })),
       skipDuplicates: true,
     });
   }
@@ -885,13 +1147,18 @@ const getExpectedTestCases = (profile, offeringPlans = []) => {
   const examCount = offeringPlans.length
     ? offeringPlans.filter((plan) => plan.hasExam !== false).length
     : offeringCount;
+  const timeSlotCount = buildTimeSlotSpecs(profile).length;
   return {
     dataset: `${profile.label} - ${profile.description}`,
-    expectedResult: 'Hybrid schedule generation should complete cleanly with all hard constraints satisfied.',
+    expectedResult: profile.feitShowcase
+      ? 'Hybrid schedule generation should show a visible optimization gain on FEIT Spring 2027 while preserving zero hard violations.'
+      : 'Hybrid schedule generation should complete cleanly with all hard constraints satisfied.',
     offerings: `${offeringCount} active course offerings seeded for ${profile.semesterName} (${examCount} producing exams; PROJECT and LAB-only offerings are excluded).`,
     rooms: `${profile.roomCount} available rooms distributed across ${profile.centerCount} centers with large-capacity halls for high-demand exams.`,
-    proctors: `${profile.proctorCount} proctors are available across the full time-slot grid to keep the dataset feasible.`,
-    timeSlots: `${profile.slotDays * slotSessions.length} valid 120-minute and 150-minute time slots are available inside the semester exam window.`,
+    proctors: profile.feitShowcase
+      ? `${profile.proctorCount} department-mapped proctors use mixed availability patterns to create balancing pressure without hard violations.`
+      : `${profile.proctorCount} proctors are available across the full time-slot grid to keep the dataset feasible.`,
+    timeSlots: `${timeSlotCount} valid time slots are available inside the semester exam window.`,
   };
 };
 
@@ -1073,15 +1340,20 @@ const upsertProctors = async (tx, profile, centerByCode, passwordHash, timeSlots
     const proctor = existingProctor ?? await tx.proctor.create({
       data: {
         userId: user.id,
-        department: index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
-        maxExamsPerDay: index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
+        department: profile.feitShowcase
+          ? feitShowcaseDepartmentTemplates[index % feitShowcaseDepartmentTemplates.length].name
+          : index % 2 === 0 ? 'Exam Operations' : 'Academic Quality Office',
+        maxExamsPerDay: profile.feitShowcase ? (index < 28 ? 3 : 2) : index % 4 === 0 ? 2 : index % 3 === 0 ? 3 : 4,
         createdBy: buildCreatedBy(profile.key),
         updatedBy: buildCreatedBy(profile.key),
       },
     });
     await tx.proctorAvailability.deleteMany({ where: { proctorId: proctor.id } });
     await tx.proctorAvailability.createMany({
-      data: timeSlots.map((slot) => ({ proctorId: proctor.id, timeSlotId: slot.id })),
+      data: (profile.feitShowcase
+        ? buildFeitSpring2027ProctorAvailability(timeSlots, index)
+        : timeSlots.map((slot) => ({ timeSlotId: slot.id }))
+      ).map((entry) => ({ proctorId: proctor.id, timeSlotId: entry.timeSlotId })),
       skipDuplicates: true,
     });
   }

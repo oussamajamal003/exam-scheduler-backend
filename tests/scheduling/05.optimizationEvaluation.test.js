@@ -79,5 +79,7 @@ describe('Hybrid Scheduler — Optimization & Evaluation (FEIT Spring 2026)', ()
     expect(result.optimization.afterScore).toBeGreaterThanOrEqual(result.optimization.beforeScore - 0.01);
     expect(Array.isArray(result.optimization.attemptedStrategies)).toBe(true);
     expect(result.optimization.attemptedStrategies.length).toBeGreaterThanOrEqual(1);
+    expect(typeof result.optimization.narrative?.headline).toBe('string');
+    expect((result.optimization.narrative?.detailLines ?? []).length).toBeGreaterThanOrEqual(1);
   });
 });

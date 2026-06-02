@@ -14,12 +14,6 @@ export const validateInputSchema = z.object({
   }),
 });
 
-export const optimizeSchema = z.object({
-  body: z.object({
-    semesterId: z.string().uuid(),
-  }),
-});
-
 export const generateScheduleSchema = z.object({
   body: z.object({
     semesterId: z.string().uuid(),

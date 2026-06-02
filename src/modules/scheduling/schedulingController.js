@@ -12,11 +12,6 @@ export const validateInput = catchAsync(async (req, res) => {
   sendResponse(res, 200, 'Data validation complete', result);
 });
 
-export const optimizeScheduling = catchAsync(async (req, res) => {
-  const result = await schedulingService.optimizeScheduling(req.body);
-  sendResponse(res, 200, 'Scheduling optimization complete', result);
-});
-
 export const generateSchedule = catchAsync(async (req, res) => {
   const result = await schedulingService.generateSchedule(req.body);
   sendResponse(res, 202, 'Hybrid constraint-based scheduling complete', result);

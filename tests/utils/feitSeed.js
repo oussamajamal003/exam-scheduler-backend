@@ -112,6 +112,7 @@ export const seedFeitScenario = async (options = {}) => {
         startDate: toDate(fixture.semesterStartDate, '00:00'),
         endDate: toDate(fixture.semesterEndDate, '23:59'),
         academicYear: fixture.academicYear,
+        isActive: true,
         createdBy,
       },
     });

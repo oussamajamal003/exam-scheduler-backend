@@ -1,4 +1,5 @@
-﻿import { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import { createHash, randomUUID } from 'crypto';
 import prisma from '../../config/prisma.js';
 import { AppError } from '../../utils/AppError.js';
 import {
@@ -17,7 +18,6 @@ const DEFAULT_MAX_PROCTOR_ASSIGNMENTS_PER_DAY = 2;
 
 const UNLIMITED_DAILY_LOAD = 999;
 const resetSchedulingState = async () => {
-  _optimizationCache.clear();
 };
 
 const getEffectiveExamDuration = (examDuration = null) => (
@@ -32,23 +32,8 @@ const computeRequiredProctors = (studentCount) => {
 };
 
 const getRequiredProctorsFromCount = (studentCount) => computeRequiredProctors(studentCount);
-const LOCAL_SEARCH_CANDIDATE_LIMIT = 6;
-const LOCAL_SEARCH_MAX_PASSES = 4;
-const LOCAL_SEARCH_SWAP_EXAM_POOL = 12;
-const LOCAL_SEARCH_SWAP_CANDIDATES = 2;
-const ADAPTIVE_ESCALATION_TARGET_GAIN = 5;
-const METRIC_REPAIR_EXAM_LIMIT = 10;
-const METRIC_REPAIR_CANDIDATE_LIMIT = 8;
-const CHAIN_SEARCH_EXAM_LIMIT = 8;
-const CHAIN_SEARCH_CANDIDATE_LIMIT = 5;
-const THREE_EXAM_SWAP_POOL = 6;
 const MIN_MEANINGFUL_MOVE_GAIN = 0.35;
 const MAX_NON_GREEDY_SCORE_DROP = 0.8;
-const PROCTOR_REBALANCE_MAX_REASSIGNMENTS = 120;
-const PROCTOR_REBALANCE_CANDIDATE_LIMIT = 32;
-const PROCTOR_REBALANCE_OVERLOADED_SCAN_LIMIT = 12;
-const MAX_CANDIDATE_ROOM_SETS = 4;
-const SKIP_LOCAL_SEARCH_SCORE_THRESHOLD = 96;
 const CANDIDATE_PENALTY_WEIGHTS = {
   unusedRoomSeats: 0.25,
   roomCount: 0.20,
@@ -56,6 +41,13 @@ const CANDIDATE_PENALTY_WEIGHTS = {
   studentDailyLoad: 0.20,
   roomCenterSpread: 0.15,
 };
+const LIGHTWEIGHT_REFINEMENT_LIMITS = {
+  maxRefinementPasses: 2,
+  maxMovesPerExam: 3,
+  maxChangedExams: 20,
+  timeBudgetMs: 8000,
+};
+const MAX_CANDIDATE_ROOM_SETS = 12;
 const EXAM_PRIORITY_BAND = {
   CRITICAL: 'CRITICAL',
   HIGH: 'HIGH',
@@ -68,46 +60,40 @@ const EXAM_PRIORITY_BAND_RANK = {
 };
 const QUALITY_WEIGHTS = {
   roomUtilization: 0.25,
-  proctorWorkloadBalance: 0.25,
-  studentSpacing: 0.20,
+  proctorWorkloadBalance: 0.30,
+  studentSpacing: 0.30,
   examDistribution: 0.15,
-  spacingBalance: 0.15,
 };
+const WEAKEST_METRIC_PENALTY_WEIGHT = 0.18;
 const HYBRID_ALGORITHM_TYPE = 'HYBRID_CONSTRAINT_BASED';
 const NO_VALID_SCHEDULE_MESSAGE = 'No valid conflict-free schedule exists for the current data/resources.';
 const GENERATION_STAGE = {
   PREPARED: 'PREPARED',
   VALIDATED: 'VALIDATED',
   DRAFT_BUILT: 'DRAFT_BUILT',
-  EVALUATED: 'EVALUATED',
-  OPTIMIZED: 'OPTIMIZED',
-  RE_EVALUATED: 'RE_EVALUATED',
   CONFIRMED: 'CONFIRMED',
   GENERATED: 'GENERATED',
   BLOCKED: 'BLOCKED',
 };
 
 const PIPELINE_STAGES = [
-  GENERATION_STAGE.PREPARED,
-  GENERATION_STAGE.VALIDATED,
-  GENERATION_STAGE.DRAFT_BUILT,
-  GENERATION_STAGE.EVALUATED,
-  GENERATION_STAGE.OPTIMIZED,
-  GENERATION_STAGE.RE_EVALUATED,
-  GENERATION_STAGE.CONFIRMED,
-  GENERATION_STAGE.GENERATED,
+  'Loading Resources',
+  'Validation',
+  'Exam Sorting',
+  'Candidate Filtering',
+  'Choose Best Valid Candidate',
+  'Reserve Candidate',
+  'Final Validation',
+  'Save Schedule',
 ];
 
-// ─── Per-semester in-memory caches ───────────────────────────────────────────
+// --- Per-semester in-memory caches -------------------------------------------
 // Both caches have a short TTL (minutes) that covers the typical workflow:
-//   optimizeScheduling (Build Draft) → user reviews results → generateSchedule
+//   prepareScheduling ? validateInput ? generateSchedule
 // They are keyed by semesterId and cleared on use or expiry.
 
 const NORMALIZED_DATA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const OPTIMIZATION_CACHE_TTL_MS = 12 * 60 * 1000;   // 12 minutes
-
-const _normalizedDataCache = new Map(); // semesterId → { data, expiresAt }
-const _optimizationCache = new Map();  // semesterId → { data, expiresAt }
+const _normalizedDataCache = new Map(); // semesterId ? { data, expiresAt }
 
 const _cacheGet = (cache, key) => {
   const entry = cache.get(key);
@@ -117,6 +103,209 @@ const _cacheGet = (cache, key) => {
 };
 const _cacheSet = (cache, key, data, ttl) => cache.set(key, { data, expiresAt: Date.now() + ttl });
 const _cacheDel = (cache, key) => cache.delete(key);
+
+const stableSerialize = (value) => {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    const entries = Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(String(value));
+};
+
+const createDeterministicHash = (value, length = 16) => createHash('sha256')
+  .update(stableSerialize(value))
+  .digest('hex')
+  .slice(0, length);
+
+const buildNormalizedFingerprint = (normalized, semester = null) => createDeterministicHash({
+  semesterId: semester?.id ?? null,
+  semesterName: semester?.name ?? null,
+  counts: {
+    exams: normalized.exams.length,
+    rooms: normalized.rooms.length,
+    proctors: normalized.proctors.length,
+    timeSlots: normalized.timeSlots.length,
+    existingAssignments: normalized.existingAssignments.length,
+    students: normalized.studentToExams?.size ?? 0,
+  },
+  examIds: [...normalized.exams].map((exam) => exam.id).sort(),
+  roomIds: [...normalized.rooms].map((room) => room.id).sort(),
+  proctorIds: [...normalized.proctors].map((proctor) => proctor.id).sort(),
+  timeSlotIds: [...normalized.timeSlots].map((slot) => slot.id).sort(),
+});
+
+const buildDraftFingerprint = (draft) => createDeterministicHash(
+  [...draft.assignmentInserts]
+    .map((assignment) => ({
+      examId: assignment.examId,
+      roomId: assignment.roomId,
+      proctorId: assignment.proctorId,
+      timeSlotId: assignment.timeSlotId,
+    }))
+    .sort((left, right) => (
+      left.examId.localeCompare(right.examId)
+      || left.timeSlotId.localeCompare(right.timeSlotId)
+      || left.roomId.localeCompare(right.roomId)
+      || left.proctorId.localeCompare(right.proctorId)
+    )),
+);
+
+const buildAssignmentDiffClassification = (before, after) => {
+  if (!before || !after) return 'MULTI_CHANGE';
+  const roomChanged = !sameIdList(before.roomIds, after.roomIds);
+  const proctorChanged = !sameIdList(before.proctorIds, after.proctorIds);
+  const timeslotChanged = !sameIdList(before.timeSlotIds, after.timeSlotIds);
+  const dateChanged = before.date !== after.date;
+  const durationChanged = before.duration !== after.duration;
+
+  if (!roomChanged && !proctorChanged && !timeslotChanged && !dateChanged && !durationChanged) return 'NO_CHANGE';
+  if (roomChanged && !proctorChanged && !timeslotChanged && !dateChanged && !durationChanged) return 'ROOM_ONLY';
+  if (!roomChanged && proctorChanged && !timeslotChanged && !dateChanged && !durationChanged) return 'PROCTOR_ONLY';
+  if (!roomChanged && !proctorChanged && timeslotChanged && !dateChanged && !durationChanged) return 'TIMESLOT_CHANGE';
+  if (!roomChanged && !proctorChanged && dateChanged && !durationChanged) return 'DATE_CHANGE';
+  return 'MULTI_CHANGE';
+};
+
+const buildAssignmentDiffs = (normalized, beforeDraft, afterDraft) => {
+  const beforeIds = [...new Set(beforeDraft.assignmentInserts.map((assignment) => assignment.examId))];
+  const afterIds = [...new Set(afterDraft.assignmentInserts.map((assignment) => assignment.examId))];
+  const trackedExamIds = [...new Set([...beforeIds, ...afterIds])];
+  const beforeSnapshots = buildMoveSnapshots(normalized, beforeDraft, trackedExamIds);
+  const afterSnapshots = buildMoveSnapshots(normalized, afterDraft, trackedExamIds);
+
+  return trackedExamIds.map((examId, index) => {
+    const before = beforeSnapshots[index] ?? null;
+    const after = afterSnapshots[index] ?? null;
+    const classification = buildAssignmentDiffClassification(before, after);
+    const changed = classification !== 'NO_CHANGE';
+
+    return changed ? {
+      examId,
+      examLabel: after?.examLabel ?? before?.examLabel ?? examId,
+      classification,
+      before,
+      after,
+      timingChanged: Boolean(before && after && (
+        before.date !== after.date
+        || before.timeslot !== after.timeslot
+        || before.duration !== after.duration
+      )),
+    } : null;
+  }).filter(Boolean);
+};
+
+const buildStudentSpacingContributionIndex = (normalized, draft) => {
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+  const studentSlotEntries = new Map();
+
+  for (const assignment of draft.assignmentInserts) {
+    const exam = examById.get(assignment.examId);
+    const slot = slotById.get(assignment.timeSlotId);
+    if (!exam || !slot) continue;
+    for (const studentId of exam.studentIds) {
+      if (!studentSlotEntries.has(studentId)) studentSlotEntries.set(studentId, []);
+      studentSlotEntries.get(studentId).push({
+        studentId,
+        examId: exam.id,
+        examLabel: exam.courseOffering?.course?.code ?? exam.courseOffering?.course?.title ?? exam.id,
+        timeSlotId: slot.id,
+        startTime: new Date(slot.startTime),
+        endTime: new Date(slot.endTime),
+        date: toDateKey(slot.date ?? slot.startTime),
+      });
+    }
+  }
+
+  const pairContributions = [];
+  const aggregateByExamPair = new Map();
+
+  for (const [studentId, slots] of studentSlotEntries.entries()) {
+    const orderedSlots = [...slots].sort((left, right) => left.startTime - right.startTime);
+    for (let leftIndex = 0; leftIndex < orderedSlots.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < orderedSlots.length; rightIndex += 1) {
+        const left = orderedSlots[leftIndex];
+        const right = orderedSlots[rightIndex];
+        const gapDays = getDayDistance(left.startTime, right.startTime);
+        const minuteGap = gapDays >= 1 ? null : getMinuteDistance(left, right);
+        const penalty = gapDays >= 1 ? 0 : (minuteGap <= 30 ? 100 : 70);
+        const preferredGapSatisfied = gapDays >= 1;
+        const backToBack = !preferredGapSatisfied && minuteGap <= 30;
+        const examIds = [left.examId, right.examId].sort();
+        const aggregateKey = examIds.join('::');
+        const contribution = {
+          studentId,
+          examIds,
+          examLabels: [left.examLabel, right.examLabel],
+          left,
+          right,
+          gapDays,
+          minuteGap,
+          penalty,
+          preferredGapSatisfied,
+          backToBack,
+          aggregateKey,
+        };
+
+        pairContributions.push(contribution);
+        const aggregate = aggregateByExamPair.get(aggregateKey) ?? {
+          aggregateKey,
+          examIds,
+          examLabels: [left.examLabel, right.examLabel],
+          totalPenalty: 0,
+          studentCount: 0,
+          sameDayPairCount: 0,
+          backToBackPairCount: 0,
+          preferredGapSatisfied: 0,
+          studentExamples: [],
+        };
+
+        aggregate.totalPenalty += penalty;
+        aggregate.studentCount += 1;
+        if (preferredGapSatisfied) {
+          aggregate.preferredGapSatisfied += 1;
+        } else {
+          aggregate.sameDayPairCount += 1;
+          if (backToBack) aggregate.backToBackPairCount += 1;
+        }
+        if (aggregate.studentExamples.length < 3) {
+          aggregate.studentExamples.push({
+            studentId,
+            leftExamId: left.examId,
+            rightExamId: right.examId,
+            gapDays,
+            minuteGap,
+            penalty,
+            preferredGapSatisfied,
+            backToBack,
+          });
+        }
+        aggregateByExamPair.set(aggregateKey, aggregate);
+      }
+    }
+  }
+
+  const aggregatePairs = [...aggregateByExamPair.values()].sort((left, right) => (
+    right.totalPenalty - left.totalPenalty || right.studentCount - left.studentCount || left.aggregateKey.localeCompare(right.aggregateKey)
+  ));
+  const contributingPairs = [...pairContributions]
+    .filter((contribution) => contribution.penalty > 0)
+    .sort((left, right) => right.penalty - left.penalty || left.studentId.localeCompare(right.studentId));
+
+  return {
+    aggregatePairs,
+    contributingPairs,
+    pairContributionMap: new Map(pairContributions.map((contribution) => [
+      `${contribution.studentId}:${contribution.aggregateKey}:${contribution.left.timeSlotId}:${contribution.right.timeSlotId}`,
+      contribution,
+    ])),
+  };
+};
 
 const getRequiredProctorCount = (studentCount) => {
   return getRequiredProctorsFromCount(studentCount);
@@ -440,7 +629,7 @@ const addExamPriorityBands = (exams) => {
       ...exam,
       priorityBand,
       priorityBandRank: EXAM_PRIORITY_BAND_RANK[priorityBand],
-      inferredPriorityScore,
+      priorityScore: inferredPriorityScore,
       prioritySignals: {
         largeStudentCount,
         graduationOrFinalYear,
@@ -455,19 +644,20 @@ const addExamPriorityBands = (exams) => {
 const comparePriorityBands = (a, b) => (
   (b.priorityBandRank ?? EXAM_PRIORITY_BAND_RANK.NORMAL)
   - (a.priorityBandRank ?? EXAM_PRIORITY_BAND_RANK.NORMAL)
-  || (b.inferredPriorityScore ?? 0) - (a.inferredPriorityScore ?? 0)
-  || b.priority - a.priority
+  || (b.priorityScore ?? 0) - (a.priorityScore ?? 0)
+);
+
+const comparePlacementDifficulty = (a, b) => (
+  (a.feasibleOptionCount ?? Number.POSITIVE_INFINITY) - (b.feasibleOptionCount ?? Number.POSITIVE_INFINITY)
+  || (a.feasibleTimeSlotCount ?? Number.POSITIVE_INFINITY) - (b.feasibleTimeSlotCount ?? Number.POSITIVE_INFINITY)
+  || (b.resourceDemand ?? 0) - (a.resourceDemand ?? 0)
+  || (b.studentCount ?? 0) - (a.studentCount ?? 0)
+  || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
 );
 
 const compareExamsForScheduling = (a, b) => (
   comparePriorityBands(a, b)
-  || b.studentCount - a.studentCount
-  || b.resourceDemand - a.resourceDemand
-  || a.feasibleOptionCount - b.feasibleOptionCount
-  || a.feasibleTimeSlotCount - b.feasibleTimeSlotCount
-  || b.conflictCount - a.conflictCount
-  || b.difficulty - a.difficulty
-  || (a.courseCode ?? '').localeCompare(b.courseCode ?? '')
+  || comparePlacementDifficulty(a, b)
 );
 
 const compareExamsLeastConstrainedFirst = (a, b) => (
@@ -540,8 +730,8 @@ const normalizeSchedulingData = ({ courseOfferings, rooms, proctors, timeSlots, 
   // Pre-compute total available room capacity once (same for every slot).
   const totalAvailableRoomCapacity = getTotalCapacity(normalizedRooms);
 
-  // Build a reverse index: slotId → Proctor[] for O(1) proctor-per-slot lookups.
-  // Avoids the O(proctors) linear scan in every slot × exam iteration.
+  // Build a reverse index: slotId ? Proctor[] for O(1) proctor-per-slot lookups.
+  // Avoids the O(proctors) linear scan in every slot � exam iteration.
   const proctorsBySlotId = new Map();
   for (const proctor of normalizedProctors) {
     for (const slotId of proctor.availableTimeSlotIds) {
@@ -613,7 +803,7 @@ const ensureExamRecords = async (courseOfferings) => {
 };
 
 const fetchSchedulingData = async (semesterId, options = {}) => {
-  // Skip cache when ensureExams is requested — that may mutate DB state.
+  // Skip cache when ensureExams is requested � that may mutate DB state.
   if (!options.ensureExams) {
     const cached = _cacheGet(_normalizedDataCache, semesterId);
     if (cached) return cached;
@@ -875,7 +1065,7 @@ const getAvailableRoomsForSlot = (sortedRooms, slot, usage) => {
 
 const getAvailableProctorsForSlot = (proctors, slot, usage, slotDayKey, proctorsBySlotId = null) => {
   // When the pre-built reverse index is provided, start from only the proctors
-  // that declared availability for this slot — avoids an O(all proctors) scan.
+  // that declared availability for this slot � avoids an O(all proctors) scan.
   const candidates = proctorsBySlotId !== null
     ? (proctorsBySlotId.get(slot.id) ?? [])
     : proctors;
@@ -1078,7 +1268,7 @@ const buildRoomAllocation = ({ exam, slot, sortedRooms, proctors, usage, slotDay
   if (hasStudentOverlap(usage, exam, slot)) return null;
 
   // getAvailableRoomsForSlot filters from sortedRooms which is already sorted desc by
-  // capacity — Array.filter preserves order, so availableRooms is also sorted desc.
+  // capacity � Array.filter preserves order, so availableRooms is also sorted desc.
   const availableRooms = getAvailableRoomsForSlot(sortedRooms, slot, usage);
   const availableProctors = getAvailableProctorsForSlot(proctors, slot, usage, slotDayKey, proctorsBySlotId);
   const requiredProctors = getRequiredProctorsForExam(exam);
@@ -1135,7 +1325,7 @@ const isValidRoomAllocation = ({ exam, slot, allocation, usage, slotDayKey }) =>
 
 const buildConflictPayload = (scheduleId, type, description) => ({ scheduleId, type, description });
 
-const getExamLabel = (exam) => [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an exam';
+const getExamLabel = (exam) => [exam.courseCode, exam.courseTitle].filter(Boolean).join(' � ') || 'an exam';
 
 const getSampleStudentLabels = (exam, max = 3) => (exam.courseOffering?.registrations ?? [])
   .map((registration) => {
@@ -1448,6 +1638,14 @@ const getRoomCountPenalty = (exam, uniqueRooms) => {
   return normalizePenaltyRatio(uniqueRooms.length - 1, maxRooms - 1);
 };
 
+const buildDraftCandidateAssignments = ({ scheduleId, exam, candidate }) => candidate.allocation.map(({ room, proctor }) => ({
+  scheduleId,
+  examId: exam.id,
+  roomId: room.id,
+  proctorId: proctor.id,
+  timeSlotId: candidate.slot.id,
+}));
+
 const scoreNormalizedCandidatePenalty = ({ exam, allocation, usage, slotDayKey }) => {
   const uniqueRooms = getUniqueAllocationRooms(allocation);
   const components = {
@@ -1469,7 +1667,36 @@ const scoreNormalizedCandidatePenalty = ({ exam, allocation, usage, slotDayKey }
   };
 };
 
-const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy, fittingSlotCache = null, proctorsBySlotId = null }) => {
+const scoreQualityAwareCandidatePenalty = ({ projectedEvaluation, localPenalty }) => {
+  const metrics = projectedEvaluation?.metrics ?? {};
+  const qualityMetrics = projectedEvaluation?.qualityMetrics ?? {};
+  const components = {
+    roomUtilization: roundMetric(100 - (metrics.roomUtilization ?? 0)),
+    proctorWorkloadBalance: roundMetric(100 - (metrics.proctorWorkloadBalance ?? 0)),
+    studentSpacing: roundMetric(100 - (metrics.studentSpacing ?? 0)),
+    examDistribution: roundMetric(100 - (metrics.examDistribution ?? 0)),
+    unusedSeats: roundMetric(localPenalty.components.unusedRoomSeats ?? 0),
+    roomSpread: roundMetric(localPenalty.components.roomCenterSpread ?? 0),
+    proctorImbalance: roundMetric(qualityMetrics.normalizedProctorBalancePenalty ?? (100 - (metrics.proctorWorkloadBalance ?? 0))),
+    studentSameDay: roundMetric(qualityMetrics.sameDayPairCount ?? 0),
+    backToBack: roundMetric(qualityMetrics.backToBackPairCount ?? 0),
+    distributionVariance: roundMetric(qualityMetrics.normalizedDistributionVariance ?? (100 - (metrics.examDistribution ?? 0))),
+    preferredSpacingViolations: roundMetric((qualityMetrics.totalStudentExamPairs ?? 0) - (qualityMetrics.preferredGapSatisfied ?? 0)),
+  };
+
+  return {
+    total: roundMetric(
+      (components.roomUtilization * QUALITY_WEIGHTS.roomUtilization)
+      + (components.proctorWorkloadBalance * QUALITY_WEIGHTS.proctorWorkloadBalance)
+      + (components.studentSpacing * QUALITY_WEIGHTS.studentSpacing)
+      + (components.examDistribution * QUALITY_WEIGHTS.examDistribution)
+    ),
+    components,
+    qualityScore: projectedEvaluation?.score ?? 0,
+  };
+};
+
+const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, usage, slotDayKeys, strategy, fittingSlotCache = null, proctorsBySlotId = null, scheduleId = 'preview', partialDraft = null, normalized = null }) => {
   if (!hasEnrollmentConstraintSatisfied(exam)) return [];
 
   const fittingSlots = fittingSlotCache?.get(exam.id) ?? orderTimeSlotsForStrategy(
@@ -1485,22 +1712,54 @@ const buildValidCandidatesForExam = ({ exam, timeSlots, sortedRooms, proctors, u
     const allocation = buildRoomAllocation({ exam, slot, sortedRooms, proctors, usage, slotDayKey, proctorsBySlotId });
     if (!isValidRoomAllocation({ exam, slot, allocation, usage, slotDayKey })) continue;
 
-    const penalty = scoreNormalizedCandidatePenalty({ exam, allocation, usage, slotDayKey });
+    const localPenalty = scoreNormalizedCandidatePenalty({ exam, allocation, usage, slotDayKey });
+    const candidate = { slot, allocation, slotDayKey };
+    const projectedDraft = normalized ? {
+      assignmentInserts: [
+        ...(partialDraft?.assignmentInserts ?? []),
+        ...buildDraftCandidateAssignments({ scheduleId, exam, candidate }),
+      ],
+      conflictInserts: [...(partialDraft?.conflictInserts ?? [])],
+      scheduledExamIds: [...(partialDraft?.scheduledExamIds ?? []), exam.id],
+      candidateScores: [...(partialDraft?.candidateScores ?? [])],
+      softPenalty: 0,
+      hardConstraintViolations: partialDraft?.conflictInserts?.length ?? 0,
+      strategyId: strategy.id ?? 'greedy-priority-csp',
+      strategyLabel: strategy.label ?? 'Greedy priority CSP draft',
+    } : null;
+    const projectedEvaluation = projectedDraft
+      ? evaluateDraftSchedule({ normalized, draft: projectedDraft })
+      : null;
+    const penalty = projectedEvaluation
+      ? scoreQualityAwareCandidatePenalty({ projectedEvaluation, localPenalty })
+      : localPenalty;
+
     candidates.push({
-      slot,
-      allocation,
-      slotDayKey,
+      ...candidate,
       penalty,
+      localPenalty,
+      projectedEvaluation,
       softPenalty: penalty.total,
     });
     if (strategy.earlyStopOnPerfectCandidate && penalty.total === 0) break;
   }
 
-  return candidates.sort((a, b) => a.softPenalty - b.softPenalty || a.slot.startTime - b.slot.startTime);
+  return candidates.sort((a, b) => (
+    a.softPenalty - b.softPenalty
+    || ((b.projectedEvaluation?.score ?? 0) - (a.projectedEvaluation?.score ?? 0))
+    || a.slot.startTime - b.slot.startTime
+  ));
 };
 
 const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, existingAssignments, lookups = null, strategy = {}, proctorsBySlotId = null }) => {
   const usage = createUsageTracker(existingAssignments, lookups);
+  const normalizedDraftContext = {
+    exams,
+    rooms,
+    proctors,
+    timeSlots,
+    proctorsBySlotId,
+  };
   const roomSorter = strategy.roomSorter ?? sortRoomsByCapacityDesc;
   const examComparator = strategy.examComparator ?? compareExamsForScheduling;
   const sortedRooms = roomSorter(rooms);
@@ -1524,6 +1783,14 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
       strategy,
       fittingSlotCache,
       proctorsBySlotId,
+      scheduleId,
+      partialDraft: {
+        assignmentInserts,
+        conflictInserts,
+        scheduledExamIds,
+        candidateScores,
+      },
+      normalized: normalizedDraftContext,
     });
 
     if (candidates.length === 0) {
@@ -1537,17 +1804,11 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
         slotDayKeys,
         proctorsBySlotId,
       }));
-      continue;
+      break;
     }
 
     const bestCandidate = candidates[0];
-    const assignments = bestCandidate.allocation.map(({ room, proctor }) => ({
-      scheduleId,
-      examId: exam.id,
-      roomId: room.id,
-      proctorId: proctor.id,
-      timeSlotId: bestCandidate.slot.id,
-    }));
+    const assignments = buildDraftCandidateAssignments({ scheduleId, exam, candidate: bestCandidate });
 
     for (const [index, assignment] of assignments.entries()) {
       reserveAssignment(usage, assignment, exam, bestCandidate.slot, bestCandidate.slotDayKey, {
@@ -1565,10 +1826,11 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
       softPenalty: bestCandidate.softPenalty,
       normalizedPenalty: bestCandidate.penalty,
       penaltyComponents: bestCandidate.penalty.components,
+      projectedScore: bestCandidate.projectedEvaluation?.score ?? null,
     });
   }
 
-  return {
+  const draft = {
     assignmentInserts,
     conflictInserts,
     scheduledExamIds,
@@ -1577,6 +1839,11 @@ const buildHybridDraft = ({ scheduleId, exams, rooms, proctors, timeSlots, exist
     hardConstraintViolations: conflictInserts.length,
     strategyId: strategy.id ?? 'greedy-priority-csp',
     strategyLabel: strategy.label ?? 'Greedy priority CSP draft',
+  };
+
+  return {
+    ...draft,
+    qualityEvaluation: evaluateDraftSchedule({ normalized: normalizedDraftContext, draft }),
   };
 };
 
@@ -1621,7 +1888,7 @@ const calculateProctorWorkloadBalance = (workloadValues, eligibleProctorCount = 
     };
   }
 
-  // ── Active-only balance ───────────────────────────────────────────────────
+  // -- Active-only balance ---------------------------------------------------
   // Measures how evenly the *assigned* proctors share load.
   const activeLoads = workloadValues.filter((load) => load > 0);
   const activeProctorCount = activeLoads.length;
@@ -1638,9 +1905,9 @@ const calculateProctorWorkloadBalance = (workloadValues, eligibleProctorCount = 
       : clampScore(100 - (activePenalty / maxActivePenalty) * 100);
   }
 
-  // ── Coverage breadth ──────────────────────────────────────────────────────
+  // -- Coverage breadth ------------------------------------------------------
   // Rewards spreading across more unique proctors.
-  // Denominator = min(assignments, ELIGIBLE proctors) — proctors who could ever
+  // Denominator = min(assignments, ELIGIBLE proctors) � proctors who could ever
   // be assigned (have declared availability for at least one slot).  Using the
   // full 199-proctor pool as denominator incorrectly penalises when 169 of them
   // have zero availability for any slot in the semester.
@@ -1650,10 +1917,10 @@ const calculateProctorWorkloadBalance = (workloadValues, eligibleProctorCount = 
   const idealUniqueProctors = Math.max(1, Math.min(totalAssignments, feasiblePoolSize));
   const coverageScore = clampScore((activeProctorCount / idealUniqueProctors) * 100);
 
-  // ── Combined score: 65% balance quality + 35% coverage breadth ───────────
+  // -- Combined score: 65% balance quality + 35% coverage breadth -----------
   const proctorWorkloadBalance = clampScore(balanceAmongActive * 0.65 + coverageScore * 0.35);
 
-  // ── Legacy penalty fields (kept for diagnostics / qualityMetrics export) ─
+  // -- Legacy penalty fields (kept for diagnostics / qualityMetrics export) -
   const sortedLoads = [...workloadValues].sort((a, b) => b - a);
   const scoringProctorCount = Math.max(1, Math.min(totalAssignments, workloadValues.length));
   const scoredLoads = sortedLoads.slice(0, scoringProctorCount);
@@ -1856,13 +2123,20 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
     spacingBalance: roundMetric(spacingMetrics.spacingBalance),
     centerProximity: roundMetric(centerProximity),
   };
-  const score = roundMetric(
+  const weakestMetricScore = Math.min(
+    metrics.roomUtilization,
+    metrics.proctorWorkloadBalance,
+    metrics.studentSpacing,
+    metrics.examDistribution,
+  );
+  const weightedScore = roundMetric(
     (metrics.roomUtilization * QUALITY_WEIGHTS.roomUtilization)
     + (metrics.proctorWorkloadBalance * QUALITY_WEIGHTS.proctorWorkloadBalance)
     + (metrics.studentSpacing * QUALITY_WEIGHTS.studentSpacing)
     + (metrics.examDistribution * QUALITY_WEIGHTS.examDistribution)
-    + (metrics.spacingBalance * QUALITY_WEIGHTS.spacingBalance),
   );
+  const weakestMetricPenalty = (100 - weakestMetricScore) * WEAKEST_METRIC_PENALTY_WEIGHT;
+  const score = roundMetric(clampScore(weightedScore - weakestMetricPenalty));
 
   const weakAreas = Object.entries(metrics)
     .filter(([key]) => key !== 'centerProximity')
@@ -1897,6 +2171,9 @@ const evaluateDraftSchedule = ({ normalized, draft }) => {
       preferredGapSatisfied: spacingMetrics.preferredGapSatisfied,
       sameDayPairCount: spacingMetrics.sameDayPairCount,
       backToBackPairCount: spacingMetrics.backToBackPairCount,
+      weightedScore,
+      weakestMetricScore,
+      weakestMetricPenalty: roundMetric(weakestMetricPenalty),
       distributionVariance: roundMetric(distributionVariance),
       normalizedDistributionVariance: roundMetric(100 - examDistribution),
       proctorWorkloadRange: workloadValues.length > 0
@@ -1994,7 +2271,7 @@ const replaceAssignmentProctor = ({ draft, targetAssignment, replacementProctorI
 // proctor availability declarations. Uses a greedy round-robin that assigns each
 // "proctor slot" in the draft to the least-loaded eligible proctor.
 // Result tells us whether the current score is near the feasibility ceiling or
-// whether the optimizer is leaving improvements on the table.
+// whether the refiner is leaving improvements on the table.
 const computeProctorBalanceCeiling = ({ normalized, draft }) => {
   const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
 
@@ -2115,7 +2392,7 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
   while (reassignmentCount < PROCTOR_REBALANCE_MAX_REASSIGNMENTS) {
     const stats = buildDraftProctorLoadStats({ normalized, draft: bestDraft });
 
-    // ── First-iteration diagnosis (printed once per rebalance call) ──────────
+    // -- First-iteration diagnosis (printed once per rebalance call) ----------
     if (reassignmentCount === 0) {
       const diagUnderused = stats.underused.length;
       const diagOverloaded = stats.overloaded.length;
@@ -2188,7 +2465,7 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
         }
       }
       console.warn(
-        `[PROCTOR_DIAG] Rejection reasons (top-3 overloaded × lower-load pool):`
+        `[PROCTOR_DIAG] Rejection reasons (top-3 overloaded � lower-load pool):`
         + ` noAvailability=${rejNoAvailSlot}`
         + ` alreadyBooked=${rejAlreadyBooked}`
         + ` dailyMax=${rejDailyMax}`
@@ -2197,7 +2474,7 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
         + ` actuallyFeasible=${diagFeasible}`,
       );
     }
-    // ── End diagnosis ────────────────────────────────────────────────────────
+    // -- End diagnosis --------------------------------------------------------
 
     // Break only if there are no overloaded proctors (underused-pool exhaustion is
     // no longer a reliable exit: we now use a broader candidate pool below).
@@ -2223,7 +2500,7 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
         const slotDayKey = toDateKey(slot.date ?? slot.startTime);
         const usage = createUsageFromDraftExcludingAssignment({ normalized, draft: bestDraft, excludedAssignment: assignment });
 
-        // ── Broader candidate pool ─────────────────────────────────────────
+        // -- Broader candidate pool -----------------------------------------
         // Previously only zero-load proctors (load < idealLoad=1) were candidates.
         // That excluded active proctors with low loads who could absorb assignments
         // from overloaded proctors and improve balanceAmongActive.
@@ -2253,7 +2530,12 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
 
           const recipientLoad = stats.loadByProctorId.get(replacementProctor.id) ?? 0;
           const moveRank = (balanceGain * 5) + scoreGain + Math.max(0, stats.idealLoad - recipientLoad);
-          if (!bestMove || moveRank > bestMove.moveRank) {
+          if (!bestMove
+            || moveRank > bestMove.moveRank + PROTECTED_METRIC_TIE_TOLERANCE
+            || (
+              Math.abs(moveRank - bestMove.moveRank) <= PROTECTED_METRIC_TIE_TOLERANCE
+              && isProtectedCandidatePreferred(evaluatedDraft, bestMove.evaluatedDraft)
+            )) {
             bestMove = {
               assignment,
               replacementProctor,
@@ -2278,6 +2560,7 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
       improvement: roundMetric(bestMove.scoreGain),
       proctorBalanceImprovement: roundMetric(bestMove.balanceGain),
       focusMetric: 'proctorWorkloadBalance',
+      moveAudit: buildMoveAudit({ normalized, beforeDraft: bestDraft, afterDraft: bestMove.evaluatedDraft }),
     });
     bestDraft = bestMove.evaluatedDraft;
     reassignmentCount += 1;
@@ -2287,6 +2570,40 @@ const runProctorRebalancePass = ({ normalized, draft, originalEvaluation }) => {
 
   return { draft: bestDraft, repairs };
 };
+
+const formatClockLabel = (date) => `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+
+const getAssignmentBundleSignature = (draft, examId) => {
+  const assignments = draft.assignmentInserts.filter((assignment) => assignment.examId === examId);
+  const roomIds = [...new Set(assignments.map((assignment) => assignment.roomId))].sort();
+  const proctorIds = [...new Set(assignments.map((assignment) => assignment.proctorId))].sort();
+  const timeSlotIds = [...new Set(assignments.map((assignment) => assignment.timeSlotId))].sort();
+  return { roomIds, proctorIds, timeSlotIds };
+};
+
+const buildAssignmentBundleSnapshot = ({ normalized, draft, examId }) => {
+  const exam = normalized.exams.find((candidate) => candidate.id === examId) ?? null;
+  const signature = getAssignmentBundleSignature(draft, examId);
+  const timeSlot = signature.timeSlotIds.length > 0
+    ? normalized.timeSlots.find((candidate) => candidate.id === signature.timeSlotIds[0])
+    : null;
+
+  return {
+    examId,
+    examCode: exam?.courseOffering?.course?.code ?? null,
+    examTitle: exam?.courseOffering?.course?.title ?? null,
+    roomIds: signature.roomIds,
+    roomNames: signature.roomIds.map((roomId) => normalized.rooms.find((room) => room.id === roomId)?.name ?? roomId),
+    proctorIds: signature.proctorIds,
+    proctorNames: signature.proctorIds.map((proctorId) => normalized.proctors.find((proctor) => proctor.id === proctorId)?.user?.name ?? proctorId),
+    timeSlotIds: signature.timeSlotIds,
+    timeslot: timeSlot ? `${formatClockLabel(timeSlot.startTime)}�${formatClockLabel(timeSlot.endTime)}` : null,
+    date: timeSlot ? toDateKey(timeSlot.date ?? timeSlot.startTime) : null,
+    duration: getEffectiveExamDuration(exam?.duration ?? null),
+  };
+};
+
+const sameIdList = (left = [], right = []) => left.length === right.length && left.every((value, index) => value === right[index]);
 
 const replaceExamAssignments = ({ draft, examId, candidate }) => {
   const nextAssignments = draft.assignmentInserts.filter((assignment) => assignment.examId !== examId);
@@ -2317,740 +2634,180 @@ const replaceExamAssignments = ({ draft, examId, candidate }) => {
   };
 };
 
-const getWeakMetricWeights = (metrics = {}) => ({
-  roomUtilization: metrics.roomUtilization < 78 ? 1.75 : 0.8,
-  proctorWorkloadBalance: metrics.proctorWorkloadBalance < 50 ? 5 : metrics.proctorWorkloadBalance < 78 ? 2.8 : 0.9,
-  studentSpacing: metrics.studentSpacing < 78 ? 2.35 : 1,
-  examDistribution: metrics.examDistribution < 78 ? 2 : 0.85,
-  spacingBalance: metrics.spacingBalance < 78 ? 2.15 : 0.9,
+const formatClock = (date) => `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+
+const uniqueSortedIds = (values = []) => [...new Set(values)].sort();
+
+const areIdListsEqual = (left = [], right = []) => {
+  const normalizedLeft = uniqueSortedIds(left);
+  const normalizedRight = uniqueSortedIds(right);
+  if (normalizedLeft.length !== normalizedRight.length) return false;
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+};
+
+const buildMoveSnapshots = (normalized, draft, examIds = []) => {
+  const examById = new Map(normalized.exams.map((exam) => [exam.id, exam]));
+  const roomById = new Map(normalized.rooms.map((room) => [room.id, room]));
+  const proctorById = new Map(normalized.proctors.map((proctor) => [proctor.id, proctor]));
+  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
+
+  return examIds.map((examId) => {
+    const exam = examById.get(examId) ?? null;
+    const assignments = draft.assignmentInserts.filter((assignment) => assignment.examId === examId);
+    const roomIds = uniqueSortedIds(assignments.map((assignment) => assignment.roomId));
+    const proctorIds = uniqueSortedIds(assignments.map((assignment) => assignment.proctorId));
+    const timeSlotIds = uniqueSortedIds(assignments.map((assignment) => assignment.timeSlotId));
+    const slot = slotById.get(timeSlotIds[0]) ?? null;
+
+    return {
+      examId,
+      examLabel: exam?.title ?? exam?.courseOffering?.course?.title ?? examId,
+      room: roomIds.map((roomId) => roomById.get(roomId)?.name ?? roomId).join(', '),
+      proctor: proctorIds.map((proctorId) => proctorById.get(proctorId)?.user?.name ?? proctorId).join(', '),
+      timeslot: slot ? `${formatClock(slot.startTime)}�${formatClock(slot.endTime)}` : null,
+      date: slot ? toDateKey(slot.date ?? slot.startTime) : null,
+      duration: getEffectiveExamDuration(exam?.duration),
+      roomIds,
+      proctorIds,
+      timeSlotIds,
+    };
+  });
+};
+
+const classifyMoveType = (beforeSnapshots, afterSnapshots) => {
+  if (beforeSnapshots.length !== 1 || afterSnapshots.length !== 1) return 'MULTI_CHANGE';
+
+  const before = beforeSnapshots[0];
+  const after = afterSnapshots[0];
+  const roomChanged = !areIdListsEqual(before.roomIds, after.roomIds);
+  const proctorChanged = !areIdListsEqual(before.proctorIds, after.proctorIds);
+  const slotChanged = !areIdListsEqual(before.timeSlotIds, after.timeSlotIds)
+    || before.date !== after.date
+    || before.timeslot !== after.timeslot;
+
+  if (slotChanged && roomChanged && proctorChanged) return 'MULTI_CHANGE';
+  if (slotChanged && roomChanged) return 'ROOM+TIMESLOT';
+  if (slotChanged && proctorChanged) return 'MULTI_CHANGE';
+  if (slotChanged) return 'TIMESLOT_CHANGE';
+  if (roomChanged && proctorChanged) return 'MULTI_CHANGE';
+  if (roomChanged) return 'ROOM_ONLY';
+  if (proctorChanged) return 'PROCTOR_ONLY';
+  return 'MULTI_CHANGE';
+};
+
+const buildMetricDeltas = (beforeMetrics = {}, afterMetrics = {}) => ({
+  score: roundMetric((afterMetrics.score ?? 0) - (beforeMetrics.score ?? 0)),
+  roomUtilization: roundMetric((afterMetrics.roomUtilization ?? 0) - (beforeMetrics.roomUtilization ?? 0)),
+  proctorWorkloadBalance: roundMetric((afterMetrics.proctorWorkloadBalance ?? 0) - (beforeMetrics.proctorWorkloadBalance ?? 0)),
+  studentSpacing: roundMetric((afterMetrics.studentSpacing ?? 0) - (beforeMetrics.studentSpacing ?? 0)),
+  examDistribution: roundMetric((afterMetrics.examDistribution ?? 0) - (beforeMetrics.examDistribution ?? 0)),
+  spacingBalance: roundMetric((afterMetrics.spacingBalance ?? 0) - (beforeMetrics.spacingBalance ?? 0)),
 });
 
-const getFocusedMetricWeights = (metrics = {}, focusMetric = null) => {
-  const weights = getWeakMetricWeights(metrics);
-  if (!focusMetric) return weights;
+const buildMoveAudit = ({ normalized, beforeDraft, afterDraft, examIds = [] }) => {
+  const beforeIds = [...new Set(beforeDraft.assignmentInserts.map((assignment) => assignment.examId))];
+  const afterIds = [...new Set(afterDraft.assignmentInserts.map((assignment) => assignment.examId))];
+  const trackedExamIds = examIds.length > 0
+    ? examIds
+    : [...new Set([...beforeIds, ...afterIds])].filter((examId) => {
+      const beforeSignature = getAssignmentBundleSignature(beforeDraft, examId);
+      const afterSignature = getAssignmentBundleSignature(afterDraft, examId);
+      return !sameIdList(beforeSignature.roomIds, afterSignature.roomIds)
+        || !sameIdList(beforeSignature.proctorIds, afterSignature.proctorIds)
+        || !sameIdList(beforeSignature.timeSlotIds, afterSignature.timeSlotIds);
+    });
+  const beforeSnapshots = buildMoveSnapshots(normalized, beforeDraft, trackedExamIds);
+  const afterSnapshots = buildMoveSnapshots(normalized, afterDraft, trackedExamIds);
+  const metricDeltas = buildMetricDeltas(
+    beforeDraft.qualityEvaluation?.metrics ?? {},
+    afterDraft.qualityEvaluation?.metrics ?? {},
+  );
+  const entries = trackedExamIds.map((examId, index) => {
+    const before = beforeSnapshots[index] ?? null;
+    const after = afterSnapshots[index] ?? null;
+    const timingChanged = Boolean(before && after && (
+      before.date !== after.date
+      || before.timeslot !== after.timeslot
+      || before.duration !== after.duration
+    ));
+
+    return {
+      examId,
+      examLabel: after?.examLabel ?? before?.examLabel ?? examId,
+      moveType: classifyMoveType(before ? [before] : [], after ? [after] : []),
+      timingChanged,
+      before,
+      after,
+      metricDeltas,
+    };
+  });
   return {
-    ...weights,
-    [focusMetric]: Math.max(weights[focusMetric] ?? 1, 3),
-    ...(focusMetric === 'studentSpacing' ? { spacingBalance: Math.max(weights.spacingBalance, 2.8) } : {}),
-    ...(focusMetric === 'spacingBalance' ? { studentSpacing: Math.max(weights.studentSpacing, 2.8) } : {}),
+    moveType: classifyMoveType(beforeSnapshots, afterSnapshots),
+    examIds: trackedExamIds,
+    before: beforeSnapshots.length === 1 ? beforeSnapshots[0] : beforeSnapshots,
+    after: afterSnapshots.length === 1 ? afterSnapshots[0] : afterSnapshots,
+    metricDeltas,
+    entries,
   };
 };
 
-const getMetricRepairOrder = (metrics = {}) => [
-  ['proctorWorkloadBalance', metrics.proctorWorkloadBalance ?? 100],
-  ['studentSpacing', metrics.studentSpacing ?? 100],
-  ['spacingBalance', metrics.spacingBalance ?? 100],
-  ['examDistribution', metrics.examDistribution ?? 100],
-  ['roomUtilization', metrics.roomUtilization ?? 100],
-]
-  .filter(([, score]) => score < 88)
-  .sort((a, b) => a[1] - b[1])
-  .map(([metric]) => metric)
-  .slice(0, 3);
+const getLocalSearchMoveAudits = (repairs = []) => repairs
+  .map((repair) => repair.moveAudit)
+  .filter(Boolean);
 
-const buildDraftMoveIndexes = ({ normalized, draft }) => {
-  const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
-  const examSlotId = new Map();
-  const dayExamCounts = new Map(
-    [...new Set(normalized.timeSlots.map((slot) => toDateKey(slot.date ?? slot.startTime)))]
-      .map((dayKey) => [dayKey, 0]),
-  );
+const PROTECTED_METRIC_TIE_TOLERANCE = 0.5;
 
-  for (const assignment of draft.assignmentInserts) {
-    if (examSlotId.has(assignment.examId)) continue;
-    examSlotId.set(assignment.examId, assignment.timeSlotId);
-    const slot = slotById.get(assignment.timeSlotId);
-    if (!slot) continue;
-    const dayKey = toDateKey(slot.date ?? slot.startTime);
-    dayExamCounts.set(dayKey, (dayExamCounts.get(dayKey) ?? 0) + 1);
-  }
+const compareProtectedMetricCandidates = (leftDraft, rightDraft) => {
+  const leftScore = leftDraft?.qualityEvaluation?.score ?? -Infinity;
+  const rightScore = rightDraft?.qualityEvaluation?.score ?? -Infinity;
+  const scoreDiff = leftScore - rightScore;
+  if (Math.abs(scoreDiff) > PROTECTED_METRIC_TIE_TOLERANCE) return scoreDiff;
 
-  return { slotById, examSlotId, dayExamCounts };
+  const leftMetrics = leftDraft?.qualityEvaluation?.metrics ?? {};
+  const rightMetrics = rightDraft?.qualityEvaluation?.metrics ?? {};
+  const spacingDiff = (leftMetrics.studentSpacing ?? 0) - (rightMetrics.studentSpacing ?? 0);
+  if (spacingDiff !== 0) return spacingDiff;
+
+  const spacingBalanceDiff = (leftMetrics.spacingBalance ?? 0) - (rightMetrics.spacingBalance ?? 0);
+  if (spacingBalanceDiff !== 0) return spacingBalanceDiff;
+
+  return scoreDiff;
 };
 
-const scoreExamOptimizationPriority = ({ exam, score, weakWeights }) => {
-  const components = score?.penaltyComponents ?? {};
-  return roundMetric(
-    ((score?.softPenalty ?? 0) * 1.35)
-    + ((components.proctorWorkload ?? 0) * weakWeights.proctorWorkloadBalance)
-    + ((components.studentDailyLoad ?? 0) * (weakWeights.studentSpacing + weakWeights.spacingBalance) * 0.6)
-    + ((components.unusedRoomSeats ?? 0) * weakWeights.roomUtilization)
-    + ((components.roomCount ?? 0) * 0.5)
-    + (exam.studentIds.length * 0.015),
-  );
+const isProtectedCandidatePreferred = (candidateDraft, currentBestDraft) => compareProtectedMetricCandidates(candidateDraft, currentBestDraft) > 0;
+
+const shouldAcceptProtectedMetricRecovery = (beforeDraft, afterDraft) => {
+  if (!beforeDraft || !afterDraft) return false;
+  const beforeMetrics = beforeDraft.qualityEvaluation?.metrics ?? {};
+  const afterMetrics = afterDraft.qualityEvaluation?.metrics ?? {};
+  const beforeScore = beforeDraft.qualityEvaluation?.score ?? 0;
+  const afterScore = afterDraft.qualityEvaluation?.score ?? 0;
+
+  return afterMetrics.studentSpacing >= beforeMetrics.studentSpacing
+    && afterMetrics.spacingBalance >= beforeMetrics.spacingBalance
+    && afterMetrics.roomUtilization >= beforeMetrics.roomUtilization
+    && afterScore >= beforeScore - 1;
 };
 
-const estimateCandidateMoveImpact = ({ candidate, currentScore, draftIndexes, weakWeights }) => {
-  const currentComponents = currentScore?.penaltyComponents ?? {};
-  const candidateComponents = candidate.penalty?.components ?? {};
-  const currentSlotId = draftIndexes.examSlotId.get(currentScore?.examId);
-  const currentSlot = draftIndexes.slotById.get(currentSlotId);
-  const currentDayKey = currentSlot ? toDateKey(currentSlot.date ?? currentSlot.startTime) : null;
-  const candidateDayKey = candidate.slotDayKey ?? toDateKey(candidate.slot.date ?? candidate.slot.startTime);
-  const currentDayCount = currentDayKey ? (draftIndexes.dayExamCounts.get(currentDayKey) ?? 0) : 0;
-  const candidateDayCount = draftIndexes.dayExamCounts.get(candidateDayKey) ?? 0;
-  const distributionGain = currentDayKey && currentDayKey !== candidateDayKey
-    ? clampScore((currentDayCount - candidateDayCount) * 12)
-    : 0;
-
-  return roundMetric(
-    (((currentScore?.softPenalty ?? 0) - candidate.softPenalty) * 1.4)
-    + (((currentComponents.proctorWorkload ?? 0) - (candidateComponents.proctorWorkload ?? 0)) * weakWeights.proctorWorkloadBalance)
-    + (((currentComponents.studentDailyLoad ?? 0) - (candidateComponents.studentDailyLoad ?? 0)) * (weakWeights.studentSpacing + weakWeights.spacingBalance) * 0.7)
-    + (((currentComponents.unusedRoomSeats ?? 0) - (candidateComponents.unusedRoomSeats ?? 0)) * weakWeights.roomUtilization)
-    + (((currentComponents.roomCount ?? 0) - (candidateComponents.roomCount ?? 0)) * 0.7)
-    + (distributionGain * weakWeights.examDistribution),
-  );
-};
-
-const rankCandidatesForCurrentWeakness = ({ candidates, currentScore, draftIndexes, weakWeights }) => {
-  const rankedCandidates = candidates.map((candidate) => ({
-    candidate,
-    estimatedImpact: estimateCandidateMoveImpact({ candidate, currentScore, draftIndexes, weakWeights }),
-  }))
-    .sort((a, b) => b.estimatedImpact - a.estimatedImpact || a.candidate.softPenalty - b.candidate.softPenalty);
-  const viableCandidates = rankedCandidates.filter((entry) => entry.estimatedImpact > -5);
-  return (viableCandidates.length > 0 ? viableCandidates : rankedCandidates.slice(0, 1))
-    .map((entry) => entry.candidate);
-};
-
-const pickBestScoringMove = ({ normalized, baseDraft, originalEvaluation, examId, candidates, currentScore, maxEvaluations, minGain = 0 }) => {
-  let bestCandidateDraft = null;
-  let bestCandidateScore = currentScore;
-  let evaluatedCount = 0;
-
-  for (const candidate of candidates) {
-    if (evaluatedCount >= maxEvaluations) break;
-    evaluatedCount += 1;
-    const candidateDraft = replaceExamAssignments({ draft: baseDraft, examId, candidate });
-    const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, originalEvaluation);
-    if (evaluatedDraft.qualityEvaluation.score >= currentScore + minGain
-      && evaluatedDraft.qualityEvaluation.score > bestCandidateScore) {
-      bestCandidateScore = evaluatedDraft.qualityEvaluation.score;
-      bestCandidateDraft = evaluatedDraft;
-    }
-  }
-
-  return { bestCandidateDraft, bestCandidateScore, evaluatedCount };
-};
-
-const runFocusedRelocationPass = ({
-  normalized,
-  draft,
-  originalEvaluation,
-  sortedRooms,
-  fittingSlotCache,
-  slotDayKeys,
-  focusMetric = null,
-  maxExams = METRIC_REPAIR_EXAM_LIMIT,
-  candidateLimit = METRIC_REPAIR_CANDIDATE_LIMIT,
-  maxEvaluations = 4,
-  minGain = MIN_MEANINGFUL_MOVE_GAIN,
-}) => {
-  let bestDraft = draft;
-  const repairs = [];
-  const weakWeights = getFocusedMetricWeights(bestDraft.qualityEvaluation.metrics, focusMetric);
-  const scoreByExamId = new Map(bestDraft.candidateScores.map((score) => [score.examId, score]));
-  const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
-  const targetedExams = [...normalized.exams]
-    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
-      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
-    .slice(0, maxExams);
-
-  for (const exam of targetedExams) {
-    const currentScore = bestDraft.qualityEvaluation.score;
-    const currentExamScore = scoreByExamId.get(exam.id);
-    const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
-    const candidates = rankCandidatesForCurrentWeakness({
-      candidates: buildValidCandidatesForExam({
-        exam,
-        timeSlots: normalized.timeSlots,
-        sortedRooms,
-        proctors: normalized.proctors,
-        usage,
-        slotDayKeys,
-        strategy: { id: 'local-search-nearby' },
-        fittingSlotCache,
-        proctorsBySlotId: normalized.proctorsBySlotId,
-      }).slice(0, candidateLimit * 4),
-      currentScore: currentExamScore,
-      draftIndexes,
-      weakWeights,
-    });
-
-    const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
-      normalized,
-      baseDraft: bestDraft,
-      originalEvaluation,
-      examId: exam.id,
-      candidates,
-      currentScore,
-      maxEvaluations,
-      minGain,
-    });
-
-    if (bestCandidateDraft !== null) {
-      repairs.push({
-        examId: exam.id,
-        fromScore: currentScore,
-        toScore: bestCandidateScore,
-        improvement: roundMetric(bestCandidateScore - currentScore),
-        focusMetric,
-      });
-      bestDraft = bestCandidateDraft;
-    }
-  }
-
-  return { draft: bestDraft, repairs };
-};
-
-const runRelocationChainEscape = ({ normalized, draft, originalEvaluation, sortedRooms, fittingSlotCache, slotDayKeys }) => {
-  let bestDraft = draft;
-  let bestScore = draft.qualityEvaluation.score;
-  const repairs = [];
-  const weakWeights = getWeakMetricWeights(draft.qualityEvaluation.metrics);
-  const scoreByExamId = new Map(draft.candidateScores.map((score) => [score.examId, score]));
-  const draftIndexes = buildDraftMoveIndexes({ normalized, draft });
-  const targetedExams = [...normalized.exams]
-    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
-      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
-    .slice(0, CHAIN_SEARCH_EXAM_LIMIT);
-
-  for (const firstExam of targetedExams) {
-    const usage = createUsageFromDraft({ normalized, draft, excludedExamId: firstExam.id });
-    const firstCandidates = rankCandidatesForCurrentWeakness({
-      candidates: buildValidCandidatesForExam({
-        exam: firstExam,
-        timeSlots: normalized.timeSlots,
-        sortedRooms,
-        proctors: normalized.proctors,
-        usage,
-        slotDayKeys,
-        strategy: { id: 'local-search-nearby' },
-        fittingSlotCache,
-        proctorsBySlotId: normalized.proctorsBySlotId,
-      }).slice(0, CHAIN_SEARCH_CANDIDATE_LIMIT * 4),
-      currentScore: scoreByExamId.get(firstExam.id),
-      draftIndexes,
-      weakWeights,
-    }).slice(0, 3);
-
-    for (const firstCandidate of firstCandidates) {
-      const firstDraft = withQualityEvaluation(
-        normalized,
-        replaceExamAssignments({ draft, examId: firstExam.id, candidate: firstCandidate }),
-        originalEvaluation,
-      );
-      if (firstDraft.qualityEvaluation.score < draft.qualityEvaluation.score - MAX_NON_GREEDY_SCORE_DROP) continue;
-
-      const secondScoreByExamId = new Map(firstDraft.candidateScores.map((score) => [score.examId, score]));
-      const secondIndexes = buildDraftMoveIndexes({ normalized, draft: firstDraft });
-      const secondExams = targetedExams.filter((exam) => exam.id !== firstExam.id).slice(0, 5);
-
-      for (const secondExam of secondExams) {
-        const secondUsage = createUsageFromDraft({ normalized, draft: firstDraft, excludedExamId: secondExam.id });
-        const secondCandidates = rankCandidatesForCurrentWeakness({
-          candidates: buildValidCandidatesForExam({
-            exam: secondExam,
-            timeSlots: normalized.timeSlots,
-            sortedRooms,
-            proctors: normalized.proctors,
-            usage: secondUsage,
-            slotDayKeys,
-            strategy: { id: 'local-search-nearby' },
-            fittingSlotCache,
-            proctorsBySlotId: normalized.proctorsBySlotId,
-          }).slice(0, CHAIN_SEARCH_CANDIDATE_LIMIT * 4),
-          currentScore: secondScoreByExamId.get(secondExam.id),
-          draftIndexes: secondIndexes,
-          weakWeights,
-        }).slice(0, 2);
-
-        for (const secondCandidate of secondCandidates) {
-          const chainDraft = withQualityEvaluation(
-            normalized,
-            replaceExamAssignments({ draft: firstDraft, examId: secondExam.id, candidate: secondCandidate }),
-            originalEvaluation,
-          );
-          if (chainDraft.qualityEvaluation.score > bestScore) {
-            bestScore = chainDraft.qualityEvaluation.score;
-            bestDraft = chainDraft;
-          }
-        }
-      }
-    }
-  }
-
-  if (bestDraft !== draft && bestScore >= draft.qualityEvaluation.score + MIN_MEANINGFUL_MOVE_GAIN) {
-    repairs.push({
-      examId: 'relocation-chain',
-      fromScore: draft.qualityEvaluation.score,
-      toScore: bestScore,
-      improvement: roundMetric(bestScore - draft.qualityEvaluation.score),
-      focusMetric: 'localOptimaEscape',
-    });
-  }
-
-  return { draft: bestDraft, repairs };
-};
-
-const runThreeExamSwapEscape = ({ normalized, draft, originalEvaluation, sortedRooms, slotDayKeys }) => {
-  let bestDraft = draft;
-  let bestScore = draft.qualityEvaluation.score;
-  const repairs = [];
-  const weakWeights = getWeakMetricWeights(draft.qualityEvaluation.metrics);
-  const scoreByExamId = new Map(draft.candidateScores.map((score) => [score.examId, score]));
-  const { slotById, examSlotId } = buildDraftMoveIndexes({ normalized, draft });
-  const targetedExams = [...normalized.exams]
-    .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
-      - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }))
-    .slice(0, THREE_EXAM_SWAP_POOL);
-  let fruitlessTriples = 0;
-
-  for (let i = 0; i < targetedExams.length; i += 1) {
-    for (let j = i + 1; j < targetedExams.length; j += 1) {
-      for (let k = j + 1; k < targetedExams.length; k += 1) {
-        if (fruitlessTriples >= 8) break;
-        const exams = [targetedExams[i], targetedExams[j], targetedExams[k]];
-        const slots = exams.map((exam) => slotById.get(examSlotId.get(exam.id)));
-        if (slots.some((slot) => !slot)) { fruitlessTriples += 1; continue; }
-
-        const directions = [
-          [slots[1], slots[2], slots[0]],
-          [slots[2], slots[0], slots[1]],
-        ];
-        let tripleImproved = false;
-
-        for (const targetSlots of directions) {
-          if (exams.some((exam, index) => !canSlotFitExam(targetSlots[index], exam))) continue;
-          const usage = createUsageFromDraft({
-            normalized,
-            draft,
-            excludedExamIds: new Set(exams.map((exam) => exam.id)),
-          });
-
-          const candidates = exams.map((exam, index) => buildValidCandidatesForExam({
-            exam,
-            timeSlots: [targetSlots[index]],
-            sortedRooms,
-            proctors: normalized.proctors,
-            usage,
-            slotDayKeys,
-            strategy: { id: 'local-search-nearby' },
-            fittingSlotCache: null,
-            proctorsBySlotId: normalized.proctorsBySlotId,
-          })[0]);
-
-          if (candidates.some((candidate) => !candidate)) continue;
-          const swappedDraft = candidates.reduce(
-            (currentDraft, candidate, index) => replaceExamAssignments({ draft: currentDraft, examId: exams[index].id, candidate }),
-            draft,
-          );
-          if (confirmHybridDraft({ draft: swappedDraft, normalized }).length > 0) continue;
-          const evaluatedDraft = withQualityEvaluation(normalized, swappedDraft, originalEvaluation);
-          if (evaluatedDraft.qualityEvaluation.score > bestScore) {
-            bestScore = evaluatedDraft.qualityEvaluation.score;
-            bestDraft = evaluatedDraft;
-            tripleImproved = true;
-          }
-        }
-
-        fruitlessTriples = tripleImproved ? 0 : fruitlessTriples + 1;
-      }
-    }
-  }
-
-  if (bestDraft !== draft && bestScore >= draft.qualityEvaluation.score + MIN_MEANINGFUL_MOVE_GAIN) {
-    repairs.push({
-      examId: 'three-exam-cycle',
-      fromScore: draft.qualityEvaluation.score,
-      toScore: bestScore,
-      improvement: roundMetric(bestScore - draft.qualityEvaluation.score),
-      focusMetric: 'distributionSpacingEscape',
-    });
-  }
-
-  return { draft: bestDraft, repairs };
-};
-
-const optimizeDraftWithLocalSearch = ({ normalized, draft, originalEvaluation }) => {
-  if (draft.conflictInserts.length > 0 || draft.scheduledExamIds.length !== normalized.exams.length) {
-    return { preview: withQualityEvaluation(normalized, draft, originalEvaluation), repairs: [] };
-  }
-
-  const slotDayKeys = buildSlotDayKeyMap(normalized.timeSlots);
-  const sortedRooms = sortRoomsByCapacityDesc(normalized.rooms);
-  const fittingSlotCache = buildFittingSlotCache(normalized.exams, normalized.timeSlots, 'local-search-nearby');
-
-  let bestDraft = withQualityEvaluation(normalized, draft, originalEvaluation);
-  const localSearchStartScore = bestDraft.qualityEvaluation.score;
-  const repairs = [];
-
-  // ── Phase 1: Multi-pass first-improvement relocation ───────────────────────
-  // "First-improvement": evaluate candidates (sorted by soft penalty asc) and
-  // accept the first one that raises global score. Avoids evaluating remaining
-  // candidates once a good move is found — ~3× fewer full evals than best-improvement.
-  // Adaptive early-stop: if a pass improves score by < 0.5 points, gains have plateaued.
-  for (let pass = 0; pass < LOCAL_SEARCH_MAX_PASSES; pass += 1) {
-    let passImproved = false;
-    const passScoreStart = bestDraft.qualityEvaluation.score;
-    const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
-    const scoreByExamId = new Map(bestDraft.candidateScores.map((score) => [score.examId, score]));
-    const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
-    const maxCandidateEvaluations = pass === 0 ? 3 : 4;
-    const candidateLimit = LOCAL_SEARCH_CANDIDATE_LIMIT + (pass > 0 && bestDraft.qualityEvaluation.score < 90 ? 2 : 0);
-    const targetedExams = [...normalized.exams]
-      .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: scoreByExamId.get(b.id), weakWeights })
-        - scoreExamOptimizationPriority({ exam: a, score: scoreByExamId.get(a.id), weakWeights }));
-
-    for (const exam of targetedExams) {
-      const currentScore = bestDraft.qualityEvaluation.score;
-      const currentExamScore = scoreByExamId.get(exam.id);
-      const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
-      // buildValidCandidatesForExam enforces all hard constraints, so confirmHybridDraft is redundant here
-      const candidates = rankCandidatesForCurrentWeakness({
-        candidates: buildValidCandidatesForExam({
-          exam,
-          timeSlots: normalized.timeSlots,
-          sortedRooms,
-          proctors: normalized.proctors,
-          usage,
-          slotDayKeys,
-          strategy: { id: 'local-search-nearby' },
-          fittingSlotCache,
-          proctorsBySlotId: normalized.proctorsBySlotId,
-        }).slice(0, candidateLimit * 4),
-        currentScore: currentExamScore,
-        draftIndexes,
-        weakWeights,
-      });
-
-      const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
-        normalized,
-        baseDraft: bestDraft,
-        originalEvaluation,
-        examId: exam.id,
-        candidates,
-        currentScore,
-        maxEvaluations: maxCandidateEvaluations,
-        minGain: pass === 0 ? 0.25 : MIN_MEANINGFUL_MOVE_GAIN,
-      });
-
-      if (bestCandidateDraft !== null) {
-        repairs.push({
-          examId: exam.id,
-          fromScore: currentScore,
-          toScore: bestCandidateScore,
-          improvement: roundMetric(bestCandidateScore - currentScore),
-        });
-        bestDraft = bestCandidateDraft;
-        passImproved = true;
-      }
-    }
-
-    const passGain = bestDraft.qualityEvaluation.score - passScoreStart;
-    if (!passImproved || passGain < 0.5 || bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break;
-  }
-
-  if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 85) {
-    const proctorRepairResult = runProctorRebalancePass({
-      normalized,
-      draft: bestDraft,
-      originalEvaluation,
-    });
-    if (proctorRepairResult.draft !== bestDraft) {
-      bestDraft = proctorRepairResult.draft;
-      repairs.push(...proctorRepairResult.repairs);
-    }
-  }
-
-  for (const focusMetric of getMetricRepairOrder(bestDraft.qualityEvaluation.metrics)) {
-    if (bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break;
-    const repairResult = runFocusedRelocationPass({
-      normalized,
-      draft: bestDraft,
-      originalEvaluation,
-      sortedRooms,
-      fittingSlotCache,
-      slotDayKeys,
-      focusMetric,
-      maxExams: METRIC_REPAIR_EXAM_LIMIT,
-      candidateLimit: METRIC_REPAIR_CANDIDATE_LIMIT,
-      maxEvaluations: 4,
-      minGain: MIN_MEANINGFUL_MOVE_GAIN,
-    });
-    if (repairResult.draft !== bestDraft) {
-      bestDraft = repairResult.draft;
-      repairs.push(...repairResult.repairs);
-    }
-  }
-
-  // ── Phase 2: Exam-pair slot swap ─────────────────────────────────────────────
-  // Tries swapping slots between pairs of high-penalty exams.
-  // Patience counter stops the search after too many consecutive fruitless pairs
-  // to avoid O(n²) exhaustion when most pairs don't help.
-  if (bestDraft.qualityEvaluation.score < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
-    const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
-    const postPhase1Scores = new Map(bestDraft.candidateScores.map((s) => [s.examId, s]));
-    const swapPool = [...normalized.exams]
-      .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: postPhase1Scores.get(b.id), weakWeights })
-        - scoreExamOptimizationPriority({ exam: a, score: postPhase1Scores.get(a.id), weakWeights }))
-      .slice(0, LOCAL_SEARCH_SWAP_EXAM_POOL);
-
-    const slotById = new Map(normalized.timeSlots.map((slot) => [slot.id, slot]));
-    const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
-
-    // O(1) slot lookup per exam instead of O(assignments) find() per pair
-    const examCurrentSlotId = new Map();
-    for (const assignment of bestDraft.assignmentInserts) {
-      if (!examCurrentSlotId.has(assignment.examId)) examCurrentSlotId.set(assignment.examId, assignment.timeSlotId);
-    }
-
-    const SWAP_PATIENCE = 10;
-    let consecutiveFruitless = 0;
-
-    outerSwap:
-    for (let i = 0; i < swapPool.length; i += 1) {
-      for (let j = i + 1; j < swapPool.length; j += 1) {
-        if (consecutiveFruitless >= SWAP_PATIENCE) break outerSwap;
-
-        const examA = swapPool[i];
-        const examB = swapPool[j];
-
-        const slotIdA = examCurrentSlotId.get(examA.id);
-        const slotIdB = examCurrentSlotId.get(examB.id);
-        if (!slotIdA || !slotIdB || slotIdA === slotIdB) { consecutiveFruitless += 1; continue; }
-
-        const slotObjA = slotById.get(slotIdA);
-        const slotObjB = slotById.get(slotIdB);
-        if (!slotObjA || !slotObjB) { consecutiveFruitless += 1; continue; }
-
-        if (!canSlotFitExam(slotObjA, examB) || !canSlotFitExam(slotObjB, examA)) { consecutiveFruitless += 1; continue; }
-
-        const usageBase = createUsageFromDraft({
-          normalized,
-          draft: bestDraft,
-          excludedExamIds: new Set([examA.id, examB.id]),
-        });
-
-        const currentExamScoreA = postPhase1Scores.get(examA.id);
-        const currentExamScoreB = postPhase1Scores.get(examB.id);
-        const candidatesA = rankCandidatesForCurrentWeakness({
-          candidates: buildValidCandidatesForExam({
-            exam: examA,
-            timeSlots: [slotObjB],
-            sortedRooms,
-            proctors: normalized.proctors,
-            usage: usageBase,
-            slotDayKeys,
-            strategy: { id: 'local-search-nearby' },
-            fittingSlotCache: null,
-            proctorsBySlotId: normalized.proctorsBySlotId,
-          }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES + 4),
-          currentScore: currentExamScoreA,
-          draftIndexes,
-          weakWeights,
-        }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES);
-
-        const candidatesB = rankCandidatesForCurrentWeakness({
-          candidates: buildValidCandidatesForExam({
-            exam: examB,
-            timeSlots: [slotObjA],
-            sortedRooms,
-            proctors: normalized.proctors,
-            usage: usageBase,
-            slotDayKeys,
-            strategy: { id: 'local-search-nearby' },
-            fittingSlotCache: null,
-            proctorsBySlotId: normalized.proctorsBySlotId,
-          }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES + 4),
-          currentScore: currentExamScoreB,
-          draftIndexes,
-          weakWeights,
-        }).slice(0, LOCAL_SEARCH_SWAP_CANDIDATES);
-
-        if (candidatesA.length === 0 || candidatesB.length === 0) { consecutiveFruitless += 1; continue; }
-
-        const currentScore = bestDraft.qualityEvaluation.score;
-        let bestSwapDraft = null;
-        let bestSwapScore = currentScore;
-        let bestSwapCandidates = null;
-        const rankedCombos = candidatesA.flatMap((candidateA) => candidatesB.map((candidateB) => ({
-          candidateA,
-          candidateB,
-          estimatedImpact:
-            estimateCandidateMoveImpact({ candidate: candidateA, currentScore: currentExamScoreA, draftIndexes, weakWeights })
-            + estimateCandidateMoveImpact({ candidate: candidateB, currentScore: currentExamScoreB, draftIndexes, weakWeights }),
-        }))).sort((a, b) => b.estimatedImpact - a.estimatedImpact).slice(0, 4);
-
-        for (const { candidateA, candidateB } of rankedCombos) {
-          const swappedDraft = replaceExamAssignments({
-            draft: replaceExamAssignments({ draft: bestDraft, examId: examA.id, candidate: candidateA }),
-            examId: examB.id,
-            candidate: candidateB,
-          });
-          const evaluatedDraft = withQualityEvaluation(normalized, swappedDraft, originalEvaluation);
-          if (evaluatedDraft.qualityEvaluation.score > bestSwapScore) {
-            bestSwapScore = evaluatedDraft.qualityEvaluation.score;
-            bestSwapDraft = evaluatedDraft;
-            bestSwapCandidates = { candidateA, candidateB };
-          }
-        }
-
-        if (bestSwapDraft !== null) {
-          repairs.push({
-            examId: `${examA.id}↔${examB.id}`,
-            fromScore: currentScore,
-            toScore: bestSwapScore,
-            improvement: roundMetric(bestSwapScore - currentScore),
-          });
-          bestDraft = bestSwapDraft;
-          examCurrentSlotId.set(examA.id, bestSwapCandidates.candidateA.slot.id);
-          examCurrentSlotId.set(examB.id, bestSwapCandidates.candidateB.slot.id);
-          consecutiveFruitless = 0;
-        } else {
-          consecutiveFruitless += 1;
-        }
-        if (bestDraft.qualityEvaluation.score >= SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) break outerSwap;
-      }
-    }
-
-    // ── Phase 3: Single post-swap relocation pass ─────────────────────────────
-    // One more first-improvement pass to capitalise on positions unlocked by swaps.
-    if (bestDraft.qualityEvaluation.score < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
-      const weakWeights = getWeakMetricWeights(bestDraft.qualityEvaluation.metrics);
-      const postSwapScores = new Map(bestDraft.candidateScores.map((s) => [s.examId, s]));
-      const draftIndexes = buildDraftMoveIndexes({ normalized, draft: bestDraft });
-      const phase3Exams = [...normalized.exams]
-        .sort((a, b) => scoreExamOptimizationPriority({ exam: b, score: postSwapScores.get(b.id), weakWeights })
-          - scoreExamOptimizationPriority({ exam: a, score: postSwapScores.get(a.id), weakWeights }));
-
-      for (const exam of phase3Exams) {
-        const currentScore = bestDraft.qualityEvaluation.score;
-        const currentExamScore = postSwapScores.get(exam.id);
-        const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
-        const candidates = rankCandidatesForCurrentWeakness({
-          candidates: buildValidCandidatesForExam({
-            exam,
-            timeSlots: normalized.timeSlots,
-            sortedRooms,
-            proctors: normalized.proctors,
-            usage,
-            slotDayKeys,
-            strategy: { id: 'local-search-nearby' },
-            fittingSlotCache,
-            proctorsBySlotId: normalized.proctorsBySlotId,
-          }).slice(0, (LOCAL_SEARCH_CANDIDATE_LIMIT + 2) * 4),
-          currentScore: currentExamScore,
-          draftIndexes,
-          weakWeights,
-        });
-
-        const { bestCandidateDraft, bestCandidateScore } = pickBestScoringMove({
-          normalized,
-          baseDraft: bestDraft,
-          originalEvaluation,
-          examId: exam.id,
-          candidates,
-          currentScore,
-          maxEvaluations: 4,
-          minGain: MIN_MEANINGFUL_MOVE_GAIN,
-        });
-
-        if (bestCandidateDraft !== null) {
-          repairs.push({
-            examId: exam.id,
-            fromScore: currentScore,
-            toScore: bestCandidateScore,
-            improvement: roundMetric(bestCandidateScore - currentScore),
-          });
-          bestDraft = bestCandidateDraft;
-        }
-      }
-    }
-  }
-
-  if (bestDraft.qualityEvaluation.score < 90
-    && (bestDraft.qualityEvaluation.score - localSearchStartScore) < ADAPTIVE_ESCALATION_TARGET_GAIN) {
-    const chainResult = runRelocationChainEscape({
-      normalized,
-      draft: bestDraft,
-      originalEvaluation,
-      sortedRooms,
-      fittingSlotCache,
-      slotDayKeys,
-    });
-    if (chainResult.draft !== bestDraft) {
-      bestDraft = chainResult.draft;
-      repairs.push(...chainResult.repairs);
-    }
-
-    const cycleResult = runThreeExamSwapEscape({
-      normalized,
-      draft: bestDraft,
-      originalEvaluation,
-      sortedRooms,
-      slotDayKeys,
-    });
-    if (cycleResult.draft !== bestDraft) {
-      bestDraft = cycleResult.draft;
-      repairs.push(...cycleResult.repairs);
-    }
-
-    for (const focusMetric of getMetricRepairOrder(bestDraft.qualityEvaluation.metrics).slice(0, 2)) {
-      const repairResult = runFocusedRelocationPass({
-        normalized,
-        draft: bestDraft,
-        originalEvaluation,
-        sortedRooms,
-        fittingSlotCache,
-        slotDayKeys,
-        focusMetric,
-        maxExams: METRIC_REPAIR_EXAM_LIMIT + 4,
-        candidateLimit: METRIC_REPAIR_CANDIDATE_LIMIT + 2,
-        maxEvaluations: 5,
-        minGain: MIN_MEANINGFUL_MOVE_GAIN,
-      });
-      if (repairResult.draft !== bestDraft) {
-        bestDraft = repairResult.draft;
-        repairs.push(...repairResult.repairs);
-      }
-    }
-
-    if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 85) {
-      const proctorRepairResult = runProctorRebalancePass({
-        normalized,
-        draft: bestDraft,
-        originalEvaluation,
-      });
-      if (proctorRepairResult.draft !== bestDraft) {
-        bestDraft = proctorRepairResult.draft;
-        repairs.push(...proctorRepairResult.repairs);
-      }
-    }
-  }
-
-  if ((bestDraft.qualityEvaluation.metrics.proctorWorkloadBalance ?? 100) < 80) {
-    const proctorRepairResult = runProctorRebalancePass({
-      normalized,
-      draft: bestDraft,
-      originalEvaluation,
-    });
-    if (proctorRepairResult.draft !== bestDraft) {
-      bestDraft = proctorRepairResult.draft;
-      repairs.push(...proctorRepairResult.repairs);
-    }
-  }
-
-  return { preview: bestDraft, repairs };
-};
-
-const BLOCKING_CATEGORY_BY_CONFLICT_TYPE = {
-  ROOM_OVERCAPACITY: 'capacity',
-  STUDENT_OVERLAP: 'studentOverlapRisks',
-  PROCTOR_DOUBLE_BOOKED: 'proctors',
-  RESOURCE_UNAVAILABLE: 'proctors',
-  TIME_CONSTRAINT_VIOLATION: 'timeSlots',
+const runProtectedSpacingRecoveryPass = ({ normalized, draft, originalEvaluation, sortedRooms, fittingSlotCache, slotDayKeys }) => {
+  const recovery = runFocusedRelocationPass({
+    normalized,
+    draft,
+    originalEvaluation,
+    sortedRooms,
+    fittingSlotCache,
+    slotDayKeys,
+    focusMetric: 'studentSpacing',
+    maxExams: 8,
+    candidateLimit: 8,
+    maxEvaluations: 6,
+    minGain: -1,
+  });
+
+  if (recovery.draft === draft) return { draft, repairs: [] };
+  if (!shouldAcceptProtectedMetricRecovery(draft, recovery.draft)) return { draft, repairs: [] };
+
+  return recovery;
 };
 
 const EMPTY_CONSTRAINT_PREVIEW = {
@@ -3064,148 +2821,156 @@ const EMPTY_CONSTRAINT_PREVIEW = {
   strategyLabel: 'Required data validation',
 };
 
-const buildConstraintPreview = (normalized) => {
-  return buildHybridDraft({
-    scheduleId: 'preview',
-    exams: normalized.exams,
-    rooms: normalized.rooms,
-    proctors: normalized.proctors,
-    timeSlots: normalized.timeSlots,
-    existingAssignments: normalized.existingAssignments,
-    lookups: normalized.lookups,
-    proctorsBySlotId: normalized.proctorsBySlotId,
-  });
-};
+const buildConstraintPreview = (normalized) => buildHybridDraft({
+  scheduleId: 'preview',
+  exams: normalized.exams,
+  rooms: normalized.rooms,
+  proctors: normalized.proctors,
+  timeSlots: normalized.timeSlots,
+  existingAssignments: normalized.existingAssignments,
+  lookups: normalized.lookups,
+  proctorsBySlotId: normalized.proctorsBySlotId,
+});
 
-const OPTIMIZATION_STRATEGIES = [
-  {
-    id: 'largest-room-first',
-    label: 'Capacity-first room selection',
-    examComparator: compareExamsForScheduling,
-    roomSorter: sortRoomsByCapacityDesc,
-    earlyStopOnPerfectCandidate: true,
-  },
-  {
-    id: 'latest-slot-first',
-    label: 'Later-slot balancing',
-    examComparator: compareExamsForScheduling,
-    roomSorter: sortRoomsByCapacityDesc,
-    earlyStopOnPerfectCandidate: true,
-  },
-  {
-    id: 'least-constrained-first',
-    label: 'Least-constrained local reordering',
-    examComparator: compareExamsLeastConstrainedFirst,
-    roomSorter: sortRoomsByCapacityDesc,
-    earlyStopOnPerfectCandidate: true,
-  },
-  {
-    id: 'priority-balance',
-    label: 'High-priority protection',
-    examComparator: compareExamsPriorityFirst,
-    roomSorter: sortRoomsByCapacityDesc,
-    earlyStopOnPerfectCandidate: true,
-  },
-  {
-    id: 'midpoint-balance',
-    label: 'Midpoint slot balance',
-    examComparator: compareExamsShortestFirst,
-    roomSorter: sortRoomsByCapacityAsc,
-    earlyStopOnPerfectCandidate: true,
-  },
-];
-
-const pickBetterConstraintPreview = (left, right) => {
-  if (!left) return right;
-  if (!right) return left;
-  if (right.conflictInserts.length < left.conflictInserts.length) return right;
-  if (right.conflictInserts.length > left.conflictInserts.length) return left;
-  if (right.scheduledExamIds.length > left.scheduledExamIds.length) return right;
-  if ((right.qualityEvaluation?.score ?? 0) > (left.qualityEvaluation?.score ?? 0)) return right;
-  if ((right.softPenalty ?? 0) < (left.softPenalty ?? 0)) return right;
-  return left;
-};
-
-const optimizeHybridDraft = (normalized) => {
-  const attemptedStrategies = [];
-  const originalDraft = buildConstraintPreview(normalized);
-  const originalEvaluation = evaluateDraftSchedule({ normalized, draft: originalDraft });
-  let bestPreview = withQualityEvaluation(normalized, originalDraft, originalEvaluation);
-  let bestStrategy = {
-    id: 'greedy-priority-csp',
-    label: 'Greedy priority CSP draft',
-  };
-
-  for (const strategy of OPTIMIZATION_STRATEGIES) {
-    attemptedStrategies.push(strategy.label);
-    const preview = withQualityEvaluation(normalized, buildHybridDraft({
-      scheduleId: 'preview',
-      exams: normalized.exams,
-      rooms: normalized.rooms,
-      proctors: normalized.proctors,
-      timeSlots: normalized.timeSlots,
-      existingAssignments: normalized.existingAssignments,
-      lookups: normalized.lookups,
-      strategy,
-      proctorsBySlotId: normalized.proctorsBySlotId,
-    }), originalEvaluation);
-
-    const betterPreview = pickBetterConstraintPreview(bestPreview, preview);
-    if (betterPreview !== bestPreview) {
-      bestPreview = preview;
-      bestStrategy = strategy;
-    }
-
-    if (preview.conflictInserts.length === 0 && (preview.qualityEvaluation?.score ?? 0) >= 92) break;
-  }
-
-  let localSearchRepairs = [];
-  if (bestPreview.conflictInserts.length === 0
-    && bestPreview.scheduledExamIds.length === normalized.exams.length
-    && (bestPreview.qualityEvaluation?.score ?? 0) < SKIP_LOCAL_SEARCH_SCORE_THRESHOLD) {
-    attemptedStrategies.push('Assignment-level local search');
-    const localSearch = optimizeDraftWithLocalSearch({
-      normalized,
-      draft: bestPreview,
-      originalEvaluation,
-    });
-    bestPreview = localSearch.preview;
-    localSearchRepairs = localSearch.repairs;
-  }
-
-  if (bestPreview.conflictInserts.length === 0
-    && bestPreview.scheduledExamIds.length === normalized.exams.length
-    && (bestPreview.qualityEvaluation?.metrics?.proctorWorkloadBalance ?? 100) < 80) {
-    attemptedStrategies.push('Post-optimization proctor rebalance');
-    const proctorRepair = runProctorRebalancePass({
-      normalized,
-      draft: bestPreview,
-      originalEvaluation,
-    });
-    if (proctorRepair.draft !== bestPreview) {
-      bestPreview = proctorRepair.draft;
-      localSearchRepairs = [...localSearchRepairs, ...proctorRepair.repairs];
-    }
-  }
-
-  const beforeScore = originalEvaluation.score;
-  const afterScore = bestPreview.qualityEvaluation?.score ?? beforeScore;
-  const improvementPercentage = roundMetric(afterScore - beforeScore);
+const buildSinglePassNarrative = ({ preview, normalized }) => {
+  const qualityEvaluation = preview.qualityEvaluation ?? { score: 0, weakAreas: [] };
+  const weakestArea = [...(qualityEvaluation.weakAreas ?? [])].sort((left, right) => left.score - right.score)[0] ?? null;
+  const blocked = preview.conflictInserts.length > 0 || preview.scheduledExamIds.length !== normalized.exams.length;
 
   return {
-    attemptedStrategies,
-    optimized: bestPreview.conflictInserts.length === 0,
-    preview: bestPreview,
-    strategy: bestStrategy,
-    localSearchRepairs,
-    evaluation: {
-      beforeOptimization: originalEvaluation,
-      afterOptimization: bestPreview.qualityEvaluation,
-      improvementPercentage,
-      improvementLabel: `${improvementPercentage >= 0 ? '+' : ''}${improvementPercentage}% Improved`,
-      weakAreas: originalEvaluation.weakAreas,
-      qualityMetrics: bestPreview.qualityEvaluation?.qualityMetrics ?? originalEvaluation.qualityMetrics,
+    highBaseline: false,
+    lowGain: false,
+    weakestMetric: weakestArea?.area ?? null,
+    weakestMetricScore: weakestArea?.score ?? null,
+    headline: blocked
+      ? 'Smart scheduling stopped at the first unschedulable exam.'
+      : 'Smart generation and bounded refinement produced the final schedule.',
+    detailLines: blocked
+      ? [NO_VALID_SCHEDULE_MESSAGE]
+      : [
+        `Final schedule quality settled at ${qualityEvaluation.score ?? 0}% after bounded refinement.`,
+        weakestArea ? `Current weakest quality area: ${weakestArea.label} (${weakestArea.score}%).` : 'No material weak area remains in the generated draft.',
+      ],
+    emphasis: blocked ? 'blocked' : 'stable',
+  };
+};
+
+const buildSchedulingDraftAttempt = (normalized) => {
+  const preview = buildConstraintPreview(normalized);
+
+  return {
+    preview,
+    originalDraft: preview,
+    refined: false,
+    isComplete: preview.conflictInserts.length === 0 && preview.scheduledExamIds.length === normalized.exams.length,
+    strategy: {
+      id: preview.strategyId,
+      label: preview.strategyLabel,
     },
+    evaluation: {
+      current: preview.qualityEvaluation,
+      qualityMetrics: preview.qualityEvaluation?.qualityMetrics ?? {},
+      weakAreas: preview.qualityEvaluation?.weakAreas ?? [],
+      narrative: buildSinglePassNarrative({ preview, normalized }),
+    },
+  };
+};
+
+const buildRefinementPartialDraft = (draft, examId) => ({
+  assignmentInserts: draft.assignmentInserts.filter((assignment) => assignment.examId !== examId),
+  conflictInserts: [...draft.conflictInserts],
+  scheduledExamIds: draft.scheduledExamIds.filter((scheduledExamId) => scheduledExamId !== examId),
+  candidateScores: draft.candidateScores.filter((candidateScore) => candidateScore.examId !== examId),
+});
+
+const refineDraftSchedule = ({ normalized, draft }) => {
+  let bestDraft = withQualityEvaluation(normalized, draft);
+  const repairs = [];
+  const sortedRooms = sortRoomsByCapacityDesc(normalized.rooms);
+  const slotDayKeys = buildSlotDayKeyMap(normalized.timeSlots);
+  const orderedExams = [...normalized.exams].sort(compareExamsForScheduling);
+  const startedAt = Date.now();
+  const changedExamIds = new Set();
+  let passesExecuted = 0;
+
+  for (let passIndex = 0; passIndex < LIGHTWEIGHT_REFINEMENT_LIMITS.maxRefinementPasses; passIndex += 1) {
+    passesExecuted = passIndex + 1;
+    let passImproved = false;
+
+    for (const exam of orderedExams) {
+      if (changedExamIds.size >= LIGHTWEIGHT_REFINEMENT_LIMITS.maxChangedExams) break;
+      if (Date.now() - startedAt >= LIGHTWEIGHT_REFINEMENT_LIMITS.timeBudgetMs) break;
+
+      const currentAssignments = bestDraft.assignmentInserts.filter((assignment) => assignment.examId === exam.id);
+      if (currentAssignments.length === 0) continue;
+
+      const currentBundle = buildAssignmentBundleSnapshot({ normalized, draft: bestDraft, examId: exam.id });
+      const currentScore = bestDraft.qualityEvaluation?.score ?? 0;
+      const usage = createUsageFromDraft({ normalized, draft: bestDraft, excludedExamId: exam.id });
+      const partialDraft = buildRefinementPartialDraft(bestDraft, exam.id);
+      const candidates = buildValidCandidatesForExam({
+        exam,
+        timeSlots: normalized.timeSlots,
+        sortedRooms,
+        proctors: normalized.proctors,
+        usage,
+        slotDayKeys,
+        strategy: { id: 'lightweight-refinement', label: 'Lightweight refinement' },
+        fittingSlotCache: null,
+        proctorsBySlotId: normalized.proctorsBySlotId,
+        scheduleId: 'preview',
+        partialDraft,
+        normalized,
+      }).slice(0, LIGHTWEIGHT_REFINEMENT_LIMITS.maxMovesPerExam);
+
+      let bestCandidateDraft = null;
+      let bestCandidate = null;
+
+      for (const candidate of candidates) {
+        const candidateBundle = {
+          roomIds: candidate.allocation.map(({ room }) => room.id),
+          proctorIds: candidate.allocation.map(({ proctor }) => proctor.id),
+          timeSlotIds: [candidate.slot.id],
+        };
+        if (
+          sameIdList(currentBundle.roomIds, candidateBundle.roomIds)
+          && sameIdList(currentBundle.proctorIds, candidateBundle.proctorIds)
+          && sameIdList(currentBundle.timeSlotIds, candidateBundle.timeSlotIds)
+        ) {
+          continue;
+        }
+
+        const candidateDraft = replaceExamAssignments({ draft: bestDraft, examId: exam.id, candidate });
+        const evaluatedDraft = withQualityEvaluation(normalized, candidateDraft, bestDraft.qualityEvaluation);
+        if (evaluatedDraft.qualityEvaluation.score > currentScore && (!bestCandidateDraft || evaluatedDraft.qualityEvaluation.score > bestCandidateDraft.qualityEvaluation.score)) {
+          bestCandidate = candidate;
+          bestCandidateDraft = evaluatedDraft;
+        }
+      }
+
+      if (!bestCandidateDraft) continue;
+
+      repairs.push({
+        examId: exam.id,
+        moveType: classifyMoveType([currentBundle], [buildAssignmentBundleSnapshot({ normalized, draft: bestCandidateDraft, examId: exam.id })]),
+        fromScore: currentScore,
+        toScore: bestCandidateDraft.qualityEvaluation.score,
+        improvement: roundMetric(bestCandidateDraft.qualityEvaluation.score - currentScore),
+        moveAudit: buildMoveAudit({ normalized, beforeDraft: bestDraft, afterDraft: bestCandidateDraft, examIds: [exam.id] }),
+      });
+
+      bestDraft = bestCandidateDraft;
+      changedExamIds.add(exam.id);
+      passImproved = true;
+    }
+
+    if (!passImproved) break;
+  }
+
+  return {
+    draft: bestDraft,
+    repairs,
+    passes: passesExecuted,
   };
 };
 
@@ -3241,11 +3006,11 @@ const confirmHybridDraft = ({ draft, normalized }) => {
   };
 
   if (draft.conflictInserts.length > 0) {
-    issues.push('The optimized draft still contains blocking hard-constraint issues.');
+    issues.push('The refined draft still contains blocking hard-constraint issues.');
   }
 
   if (new Set(draft.scheduledExamIds).size !== normalized.exams.length) {
-    issues.push('The optimized draft does not assign every active exam.');
+    issues.push('The refined draft does not assign every active exam.');
   }
 
   for (const assignment of draft.assignmentInserts) {
@@ -3254,14 +3019,14 @@ const confirmHybridDraft = ({ draft, normalized }) => {
     const proctor = proctorById.get(assignment.proctorId);
     const slot = slotById.get(assignment.timeSlotId);
     if (!exam || !room || !proctor || !slot) {
-      issues.push('The optimized draft references a missing exam, room, proctor, or time slot.');
+      issues.push('The refined draft references a missing exam, room, proctor, or time slot.');
       continue;
     }
 
     const slotDayKey = toDateKey(slot.date ?? slot.startTime);
 
     if (exam.studentCount <= 0 || exam.studentIds.length === 0) {
-      issues.push('An exam without enrollments is present in the optimized draft.');
+      issues.push('An exam without enrollments is present in the refined draft.');
     }
 
     if (!canSlotFitExam(slot, exam)) {
@@ -3389,7 +3154,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
   }
 
   if (normalized.timeSlots.length === 0) {
-    const semRange = `${fmtDate(semester.startDate)} – ${fmtDate(semester.endDate)}`;
+    const semRange = `${fmtDate(semester.startDate)} � ${fmtDate(semester.endDate)}`;
     groups.timeSlots.push(
       `No time slots fall within the "${semester.name}" period (${semRange}). Create time slots with dates inside this range.`,
     );
@@ -3407,7 +3172,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
 
   const emptyOfferings = normalized.exams.filter((exam) => exam.studentCount === 0);
   for (const exam of emptyOfferings) {
-    const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+    const label = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' � ') || 'an offering';
     groups.enrollments.push(`"${label}" has no enrolled students. Add at least one enrollment before generating.`);
   }
 
@@ -3422,7 +3187,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
     const examLabel = getExamLabel(exam);
     const fittingSlotCount = normalized.timeSlots.filter((slot) => canSlotFitExam(slot, exam)).length;
     if (fittingSlotCount === 0) {
-      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' � ') || 'an offering';
       warnings.push(
         `"${courseLabel}" does not fit any currently valid time slot and will be reported as a blocking issue.`,
       );
@@ -3434,7 +3199,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
     }
 
     const requiredProctors = getRequiredProctorsForExam(exam);
-    // Use pre-indexed reverse map instead of O(slots × proctors) scan.
+    // Use pre-indexed reverse map instead of O(slots � proctors) scan.
     const maxProctorCoverage = normalized.timeSlots.reduce((max, slot) => {
       if (!canSlotFitExam(slot, exam)) return max;
       return Math.max(max, normalized.proctorsBySlotId.get(slot.id)?.length ?? 0);
@@ -3444,7 +3209,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
     }
 
     if (supervisedCapacity < exam.requiredSeats) {
-      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' — ') || 'an offering';
+      const courseLabel = [exam.courseCode, exam.courseTitle].filter(Boolean).join(' � ') || 'an offering';
       warnings.push(
         `"${courseLabel}" needs ${exam.requiredSeats} seats and ${requiredProctors} proctor${requiredProctors !== 1 ? 's' : ''} for ${exam.studentCount} enrolled student${exam.studentCount !== 1 ? 's' : ''}; current resources may be insufficient.`,
       );
@@ -3481,7 +3246,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
   }
 
   const preview = includeConstraintPreview
-    ? (constraintPreview ?? optimizeHybridDraft(normalized).preview)
+    ? (constraintPreview ?? buildSchedulingDraftAttempt(normalized).preview)
     : EMPTY_CONSTRAINT_PREVIEW;
   const blockingIssues = includeConstraintPreview
     ? buildBlockingIssuesFromConflicts(preview.conflictInserts)
@@ -3515,7 +3280,7 @@ const collectPreValidationState = async ({ normalized, semester, constraintPrevi
   };
 };
 
-const buildValidationResponse = ({ normalized, semester, groups, warnings, constraintPreview, optimization = undefined }) => {
+const buildValidationResponse = ({ normalized, semester, groups, warnings, constraintPreview }) => {
   const allIssues = [
     ...groups.rooms,
     ...groups.proctors,
@@ -3589,7 +3354,6 @@ const buildValidationResponse = ({ normalized, semester, groups, warnings, const
       studentOverlapRisks: { ok: groups.studentOverlapRisks.length === 0, issues: groups.studentOverlapRisks },
     },
     issues: allIssues,
-    ...(optimization ? { optimization } : {}),
   };
 };
 
@@ -3661,73 +3425,6 @@ export const validateInput = async (data) => {
   });
 };
 
-export const optimizeScheduling = async (data) => {
-  await resetSchedulingState();
-  const { normalized, semester } = await fetchSchedulingData(data.semesterId);
-  const baseState = await collectPreValidationState({ normalized, semester, includeConstraintPreview: false });
-
-  const requiredDataIssueCount = [
-    ...baseState.groups.rooms,
-    ...baseState.groups.proctors,
-    ...baseState.groups.timeSlots,
-    ...baseState.groups.courseOfferings,
-    ...baseState.groups.enrollments,
-  ].length;
-
-  if (requiredDataIssueCount > 0) {
-    return buildValidationResponse({
-      normalized,
-      semester,
-      groups: baseState.groups,
-      warnings: baseState.warnings,
-      constraintPreview: EMPTY_CONSTRAINT_PREVIEW,
-      optimization: {
-        attempted: false,
-        optimized: false,
-        attemptedStrategies: [],
-        message: 'Optimization cannot proceed because required data validation already shows the schedule is impossible with the current resources.',
-      },
-    });
-  }
-
-  const optimizationAttempt = optimizeHybridDraft(normalized);
-  // Cache the result so generateSchedule can reuse it without re-running the
-  // full optimization pass (which is the dominant cost of "Final Generation").
-  _cacheSet(_optimizationCache, data.semesterId, optimizationAttempt, OPTIMIZATION_CACHE_TTL_MS);
-  const nextState = await collectPreValidationState({
-    normalized,
-    semester,
-    constraintPreview: optimizationAttempt.preview,
-    cachedStudentUserMap: baseState.studentUserMap,
-  });
-
-  return buildValidationResponse({
-    normalized,
-    semester,
-    groups: nextState.groups,
-    warnings: nextState.warnings,
-    constraintPreview: nextState.constraintPreview,
-    optimization: {
-      attempted: true,
-      optimized: optimizationAttempt.optimized,
-      strategy: optimizationAttempt.strategy.label,
-      attemptedStrategies: optimizationAttempt.attemptedStrategies,
-      softPenalty: optimizationAttempt.preview.softPenalty ?? 0,
-      beforeScore: optimizationAttempt.evaluation.beforeOptimization.score,
-      afterScore: optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score,
-      beforeQualityMetrics: optimizationAttempt.evaluation.beforeOptimization.qualityMetrics,
-      improvementPercentage: optimizationAttempt.evaluation.improvementPercentage,
-      improvementLabel: optimizationAttempt.evaluation.improvementLabel,
-      weakAreas: optimizationAttempt.evaluation.weakAreas,
-      qualityMetrics: optimizationAttempt.evaluation.qualityMetrics,
-      localSearchRepairs: optimizationAttempt.localSearchRepairs,
-      message: optimizationAttempt.optimized
-        ? `Optimization confirmed a clean allocation using: ${optimizationAttempt.strategy.label}. Before: ${optimizationAttempt.evaluation.beforeOptimization.score}%. After: ${optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score}%. ${optimizationAttempt.evaluation.improvementLabel}`
-        : `Optimization evaluated ${optimizationAttempt.attemptedStrategies.length} bounded strateg${optimizationAttempt.attemptedStrategies.length === 1 ? 'y' : 'ies'} but blocking issues remain.`,
-    },
-  });
-};
-
 export const generateSchedule = async (data) => {
   await resetSchedulingState();
   const { semesterId, scheduleName } = data;
@@ -3761,13 +3458,13 @@ export const generateSchedule = async (data) => {
     throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
 
-  const optimizationAttempt = _cacheGet(_optimizationCache, semesterId) ?? optimizeHybridDraft(normalized);
-  // Consume the cache entry — each generate call gets exactly one use.
-  _cacheDel(_optimizationCache, semesterId);
+  const draftAttempt = buildSchedulingDraftAttempt(normalized);
+  const refinementAttempt = refineDraftSchedule({ normalized, draft: draftAttempt.preview });
+  const effectivePreview = refinementAttempt.draft;
   const { groups, constraintPreview } = await collectPreValidationState({
     normalized,
     semester,
-    constraintPreview: optimizationAttempt.preview,
+    constraintPreview: effectivePreview,
     cachedStudentUserMap: requiredDataState.studentUserMap,
   });
   const blockingIssueCount = [
@@ -3779,21 +3476,21 @@ export const generateSchedule = async (data) => {
     ...groups.studentOverlapRisks,
   ].length;
 
-  const effectivePreview = constraintPreview;
+  const effectivePreviewFromValidation = constraintPreview;
   const remainingBlockingIssueCount = blockingIssueCount;
 
-  if (remainingBlockingIssueCount > 0 || effectivePreview.conflictInserts.length > 0) {
+  if (remainingBlockingIssueCount > 0 || effectivePreviewFromValidation.conflictInserts.length > 0) {
     throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
 
-  if (effectivePreview.scheduledExamIds.length !== normalized.exams.length) {
+  if (effectivePreviewFromValidation.scheduledExamIds.length !== normalized.exams.length) {
     throw new AppError(
       NO_VALID_SCHEDULE_MESSAGE,
       400,
     );
   }
 
-  const confirmationIssues = confirmHybridDraft({ draft: effectivePreview, normalized });
+  const confirmationIssues = confirmHybridDraft({ draft: effectivePreviewFromValidation, normalized });
   if (confirmationIssues.length > 0) {
     throw new AppError(NO_VALID_SCHEDULE_MESSAGE, 400);
   }
@@ -3801,7 +3498,10 @@ export const generateSchedule = async (data) => {
   let result;
   try {
     result = await prisma.$transaction(async (tx) => {
-    await assertScheduleNameAvailable(tx, normalizedScheduleName);
+    // Note: name availability was already checked prior to the transaction.
+    // Skip the redundant assert here to avoid an extra query and reduce
+    // transaction duration. Rely on the DB unique constraint to catch any
+    // rare race and remapScheduleNameConflict to handle it.
 
     const draftExamIdToPersistedId = new Map(
       normalized.exams
@@ -3826,13 +3526,12 @@ export const generateSchedule = async (data) => {
         isFinal: false,
         algorithmType: HYBRID_ALGORITHM_TYPE,
         generationStage: GENERATION_STAGE.GENERATED,
-        qualityScore: effectivePreview.qualityEvaluation?.score ?? Math.max(0, 100 - (effectivePreview.softPenalty ?? 0)),
+        qualityScore: effectivePreviewFromValidation.qualityEvaluation?.score ?? Math.max(0, 100 - (effectivePreviewFromValidation.softPenalty ?? 0)),
         hardConstraintScore: 0,
-        softConstraintScore: Math.round(effectivePreview.softPenalty ?? 0),
+        softConstraintScore: Math.round(effectivePreviewFromValidation.softPenalty ?? 0),
         algorithmMetadata: {
           pipeline: PIPELINE_STAGES,
-          strategy: effectivePreview.strategyLabel,
-          attemptedStrategies: optimizationAttempt.attemptedStrategies,
+          strategy: effectivePreviewFromValidation.strategyLabel,
           lookupTables: [
             'studentExamMap',
             'proctorAvailabilityMap',
@@ -3845,18 +3544,23 @@ export const generateSchedule = async (data) => {
           ],
           bruteForce: false,
           createdExamCount: missingExamDrafts.length,
-          evaluation: optimizationAttempt.evaluation,
-          localSearchRepairs: optimizationAttempt.localSearchRepairs,
+          evaluation: effectivePreviewFromValidation.qualityEvaluation,
+          refinement: {
+            applied: refinementAttempt.repairs.length > 0,
+            passes: refinementAttempt.passes,
+            changedExams: refinementAttempt.repairs.length,
+            repairs: refinementAttempt.repairs.slice(0, 10),
+          },
         },
       },
     });
 
-    const assignmentInserts = effectivePreview.assignmentInserts.map((assignment) => ({
+    const assignmentInserts = effectivePreviewFromValidation.assignmentInserts.map((assignment) => ({
       ...assignment,
       scheduleId: schedule.id,
       examId: draftExamIdToPersistedId.get(assignment.examId) ?? assignment.examId,
     }));
-    const scheduledExamIds = [...effectivePreview.scheduledExamIds]
+    const scheduledExamIds = [...effectivePreviewFromValidation.scheduledExamIds]
       .map((examId) => draftExamIdToPersistedId.get(examId) ?? examId);
 
     if (assignmentInserts.length > 0) {
@@ -3870,28 +3574,66 @@ export const generateSchedule = async (data) => {
       });
     }
 
-    const fullSchedule = await tx.schedule.findUnique({
-      where: { id: schedule.id },
-      include: generatedScheduleInclude,
-    });
-
-    if (!fullSchedule) throw new AppError('Generated schedule could not be loaded', 500);
+    // Avoid loading the full schedule (with all nested relations) inside the
+    // transaction — this can be slow for large schedules. Instead return a
+    // lightweight summary immediately and perform any expensive post-processing
+    // (detailed analysis, notifications, analytics) asynchronously after the
+    // transaction completes.
+    const lightweightSchedule = {
+      id: schedule.id,
+      name: schedule.name,
+      isFinal: schedule.isFinal,
+      algorithmType: schedule.algorithmType,
+      generationStage: schedule.generationStage,
+      qualityScore: schedule.qualityScore,
+      hardConstraintScore: schedule.hardConstraintScore,
+      softConstraintScore: schedule.softConstraintScore,
+      algorithmMetadata: schedule.algorithmMetadata,
+      createdAt: schedule.createdAt,
+      updatedAt: schedule.updatedAt,
+      _count: { assignments: assignmentInserts.length },
+    };
 
     return {
-      fullSchedule,
+      fullSchedule: lightweightSchedule,
       assignmentInserts,
       scheduledExamIds,
     };
     }, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 30000,
-      maxWait: 10000,
+      // Use ReadCommitted to reduce locking contention and latency while
+      // preserving reasonable consistency for this workflow.
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      // Reduce timeout so clients fail faster on unexpected delays.
+      timeout: 20000,
+      maxWait: 5000,
     });
   } catch (error) {
     await remapScheduleNameConflict(prisma, normalizedScheduleName, error);
   }
 
   const { fullSchedule, assignmentInserts } = result;
+  // Spawn background post-processing to perform any expensive loads or
+  // analyses without delaying the response to the client. This warms caches
+  // and runs validation/analytics asynchronously.
+  if (result?.fullSchedule?.id) {
+    const _scheduleId = result.fullSchedule.id;
+    // run async, don't await
+    void (async () => {
+      try {
+        // Load the full schedule with relations and run analysis to warm any
+        // downstream consumers. Errors here are non-fatal for the generation
+        // request and should be logged only.
+        const full = await prisma.schedule.findUnique({ where: { id: _scheduleId }, include: generatedScheduleInclude });
+        if (full) {
+          // compute analysis (this is CPU/DB intensive) but useful for later
+          await getScheduleAnalysis(_scheduleId);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Background schedule post-processing failed', err);
+      }
+    })();
+  }
 
   return {
     scheduleId: fullSchedule.id,
@@ -3902,14 +3644,15 @@ export const generateSchedule = async (data) => {
     algorithm: {
       type: HYBRID_ALGORITHM_TYPE,
       pipeline: PIPELINE_STAGES,
-      strategy: effectivePreview.strategyLabel,
-      softPenalty: effectivePreview.softPenalty ?? 0,
-      beforeScore: optimizationAttempt.evaluation.beforeOptimization.score,
-      afterScore: optimizationAttempt.evaluation.afterOptimization?.score ?? optimizationAttempt.evaluation.beforeOptimization.score,
-      improvementPercentage: optimizationAttempt.evaluation.improvementPercentage,
-      improvementLabel: optimizationAttempt.evaluation.improvementLabel,
-      weakAreas: optimizationAttempt.evaluation.weakAreas,
-      qualityMetrics: optimizationAttempt.evaluation.qualityMetrics,
+      strategy: effectivePreviewFromValidation.strategyLabel,
+      softPenalty: effectivePreviewFromValidation.softPenalty ?? 0,
+      qualityMetrics: effectivePreviewFromValidation.qualityEvaluation?.qualityMetrics ?? {},
+      narrative: buildSinglePassNarrative({ preview: effectivePreviewFromValidation, normalized }),
+      refinement: {
+        applied: refinementAttempt.repairs.length > 0,
+        passes: refinementAttempt.passes,
+        changedExams: refinementAttempt.repairs.length,
+      },
     },
   };
 };

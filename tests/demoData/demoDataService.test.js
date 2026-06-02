@@ -173,6 +173,24 @@ describe('demo data service', () => {
     expect(second.summary.rooms).toBeGreaterThan(0);
   });
 
+  it('generates the FEIT Spring 2027 optimization showcase dataset', async () => {
+    const generated = await generateDemoData({ dataset: 'FEIT2027' });
+
+    expect(generated).toMatchObject({
+      dataset: 'FEIT2027',
+      datasetLabel: 'FEIT Spring 2027',
+    });
+    expect(generated.summary.departments).toBe(5);
+    expect(generated.summary.programs).toBe(8);
+    expect(generated.summary.semesters).toBe(1);
+    expect(generated.summary.courseOfferings).toBe(52);
+    expect(generated.summary.students).toBe(1080);
+    expect(generated.summary.rooms).toBe(58);
+    expect(generated.summary.proctors).toBe(88);
+    expect(generated.summary.timeSlots).toBe(28);
+    expect(generated.expectedTestCases?.expectedResult).toMatch(/visible optimization gain/i);
+  });
+
   it('still clears a dataset that has no schedules', async () => {
     const generated = await generateDemoData({ dataset: 'A' });
 
