@@ -4,7 +4,7 @@ import { AppError } from '../../utils/AppError.js';
 
 const DEMO_PREFIX = 'DEMO-';
 const DEMO_PASSWORD = 'Demo12345!';
-const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL', 'FEIT2027'];
+const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL', 'FEIT2027', 'FAIL', 'FAIL2', 'FAIL3'];
 
 const departmentTemplates = [
   { name: 'Computer Science', code: 'CS' },
@@ -67,13 +67,29 @@ const roomNamePool = [
   'Learning Commons',
 ];
 
-const roomCapacityPool = [220, 200, 180, 160, 140, 128, 116, 104, 96, 88, 80, 72, 64, 56, 48, 42];
+// Room capacities constrained to 30..200 with a mix of small/medium/large
+const roomCapacityPool = [
+  // small (30-60)
+  30, 36, 42, 48, 54, 60,
+  // medium (61-120)
+  64, 72, 80, 88, 96, 104, 112, 120,
+  // large (121-200)
+  128, 140, 156, 172, 188, 200,
+];
 const slotSessions = [
   ['09:00', '11:00'],
   ['11:30', '13:30'],
   ['14:00', '16:00'],
   ['09:00', '11:30'],
   ['13:00', '15:30'],
+];
+const failDemo2SlotSpecs = [
+  ['2027-06-01', '09:00', '11:00'],
+  ['2027-06-01', '11:30', '13:30'],
+  ['2027-06-02', '09:00', '11:00'],
+  ['2027-06-02', '11:30', '13:30'],
+  ['2027-06-03', '09:00', '11:00'],
+  ['2027-06-03', '11:30', '13:30'],
 ];
 const courseTitleVariants = ['Advanced', 'Applied', 'Studio', 'Laboratory', 'Seminar', 'Workshop'];
 
@@ -167,6 +183,64 @@ const datasetProfiles = {
     maxOfferingTarget: 180,
     feitShowcase: true,
   },
+  FAIL: {
+    key: 'FAIL',
+    namespace: 'DEMO-FAIL',
+    label: 'Fail Demo Dataset',
+    description: 'Deterministically unschedulable dataset demonstrating generation failures',
+    semesterName: 'Demo Fail - Constrained Exam Window',
+    semesterStartDate: '2027-06-01',
+    semesterEndDate: '2027-06-05',
+    academicYear: '2026-2027',
+    studentCount: 300,
+    proctorCount: 10,
+    centerCount: 2,
+    roomCount: 4,
+    offeringCount: 80,
+    slotDays: 0,
+    targetScale: 1,
+    maxOfferingTarget: 200,
+    // Mark specially so generator can produce an impossible schedule every run.
+    constrainedFailureDemo: true,
+  },
+  FAIL2: {
+    key: 'FAIL2',
+    namespace: 'DEMO-FAIL2',
+    label: 'Fail Demo Dataset 2',
+    description: 'Deterministically unschedulable dataset with a small time-slot window for failure-path testing',
+    semesterName: 'Demo Fail 2 - Constrained Exam Window',
+    semesterStartDate: '2027-06-01',
+    semesterEndDate: '2027-06-05',
+    academicYear: '2026-2027',
+    studentCount: 300,
+    proctorCount: 20,
+    centerCount: 2,
+    roomCount: 4,
+    offeringCount: 80,
+    slotDays: 1,
+    targetScale: 1,
+    maxOfferingTarget: 200,
+    constrainedFailureDemo: true,
+  },
+  FAIL3: {
+    key: 'FAIL3',
+    namespace: 'DEMO-FAIL3',
+    label: 'Fail Demo Dataset 3',
+    description: 'Deterministically unschedulable dataset that fails during candidate filtering',
+    semesterName: 'Demo Fail 3 - Candidate Filtering Trap',
+    semesterStartDate: '2027-06-01',
+    semesterEndDate: '2027-06-12',
+    academicYear: '2026-2027',
+    studentCount: 420,
+    proctorCount: 80,
+    centerCount: 4,
+    roomCount: 20,
+    offeringCount: 30,
+    slotDays: 5,
+    targetScale: 1,
+    maxOfferingTarget: 120,
+    candidateFilteringFailureDemo: true,
+  },
 };
 
 // Real FEIT Spring 2026 course offerings.
@@ -230,12 +304,13 @@ const feitShowcaseCenterTemplates = [
   { code: 'WEST', name: 'West Examination Halls', location: 'West Campus' },
   { code: 'CENTRAL', name: 'Central Learning Commons', location: 'Main Campus' },
 ];
+// Ensure FEIT showcase capacities also respect 30..200 limits
 const feitShowcaseRoomCapacities = {
-  NORTH: [28, 32, 36, 44, 52, 60, 72, 84, 128, 168, 220, 240],
-  SOUTH: [24, 30, 34, 42, 48, 56, 68, 80, 124, 164, 210, 230],
-  EAST: [22, 28, 32, 40, 46, 54, 66, 76, 118, 152, 200, 220],
-  WEST: [26, 30, 36, 44, 50, 58, 70, 82, 132, 176, 225],
-  CENTRAL: [24, 30, 34, 42, 48, 56, 68, 78, 126, 166, 210],
+  NORTH: [30, 32, 36, 44, 52, 60, 72, 84, 128, 168, 180, 200],
+  SOUTH: [30, 34, 42, 48, 56, 68, 80, 104, 124, 164, 180, 200],
+  EAST: [30, 32, 40, 46, 54, 66, 76, 100, 118, 152, 180, 200],
+  WEST: [30, 36, 44, 50, 58, 70, 82, 100, 132, 176, 190],
+  CENTRAL: [30, 34, 42, 48, 56, 68, 78, 100, 126, 166, 190],
 };
 const feitShowcaseSlotSpecs = [
   ['2027-05-17', '09:00', '11:00'],
@@ -421,7 +496,8 @@ const buildFeitSpring2027OfferingPlans = (profile) => {
         title,
         programCode: `${profile.namespace}-PROG-${program.code}`,
         cohorts,
-        target: coreTargets[courseIndex] - (programIndex % 2) * 4 - (program.code === 'NET' && courseIndex >= 2 ? 24 : 0),
+        // Clamp core targets to 5..60
+        target: Math.min(60, Math.max(5, coreTargets[courseIndex] - (programIndex % 2) * 4 - (program.code === 'NET' && courseIndex >= 2 ? 24 : 0))),
         duration: 120,
         priority: 88 - courseIndex * 5,
         difficulty: 7 - (courseIndex === 3 ? 2 : 0),
@@ -439,7 +515,7 @@ const buildFeitSpring2027OfferingPlans = (profile) => {
       title: spec.title,
       programCode: `${profile.namespace}-PROG-${spec.programCode}`,
       cohorts: spec.cohorts,
-      target: spec.target,
+      target: Math.min(60, Math.max(5, spec.target)),
       duration: 120,
       priority: 82,
       difficulty: 6,
@@ -456,7 +532,7 @@ const buildFeitSpring2027OfferingPlans = (profile) => {
       title: spec.title,
       programCode: `${profile.namespace}-PROG-${spec.programCode}`,
       cohorts: spec.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
-      target: spec.target,
+      target: Math.min(60, Math.max(5, spec.target)),
       duration: 120,
       priority: 60,
       difficulty: 4,
@@ -586,7 +662,8 @@ const buildRealOfferingPlans = (profile) => realOfferings.map((offering) => ({
   title: offering.title,
   programCode: `${profile.namespace}-PROG-${offering.programCode}`,
   cohorts: offering.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
-  target: offering.target,
+  // Clamp real offering targets to 5..60 as part of demo constraints
+  target: Math.min(60, Math.max(5, offering.target)),
   duration: offering.duration,
   credits: offering.credits,
   instructor: offering.instructor,
@@ -599,29 +676,53 @@ const buildRealOfferingPlans = (profile) => realOfferings.map((offering) => ({
   notes: `${profile.label} - ${offering.type} - ${offering.day} ${offering.time}`,
 }));
 
+
+
+// Special-case injection for candidate-filtering failure dataset: replace the
+// first offering with an explicitly impossible exam (Advanced AI Final)
+// that cannot be split across multiple rooms and has 65 students while the
+// room inventory will be constrained to a 60-seat maximum.
 const buildOfferingPlans = (profile) => {
   if (profile.feitShowcase) return buildFeitSpring2027OfferingPlans(profile);
   if (profile.realData) return buildRealOfferingPlans(profile);
-  return Array.from({ length: profile.offeringCount }, (_, index) => {
-  const template = courseTemplates[index % courseTemplates.length];
-  const cycle = Math.floor(index / courseTemplates.length);
-  const variant = cycle === 0 ? '' : ` ${courseTitleVariants[(cycle - 1) % courseTitleVariants.length]}`;
-  const target = Math.min(
-    profile.maxOfferingTarget,
-    Math.max(24, Math.round(template.target * profile.targetScale) + cycle * 6 + (index % 4) * 3),
-  );
+  const offerings = Array.from({ length: profile.offeringCount }, (_, index) => {
+    const template = courseTemplates[index % courseTemplates.length];
+    const cycle = Math.floor(index / courseTemplates.length);
+    const variant = cycle === 0 ? '' : ` ${courseTitleVariants[(cycle - 1) % courseTitleVariants.length]}`;
+    let target = Math.min(
+      profile.maxOfferingTarget,
+      Math.max(5, Math.round(template.target * profile.targetScale) + cycle * 6 + (index % 4) * 3),
+    );
+    target = Math.min(60, Math.max(5, target));
 
-  return {
-    code: `${profile.namespace}-${template.code}-${String(cycle + 1).padStart(2, '0')}`,
-    title: `${template.title}${variant}`,
-    programCode: `${profile.namespace}-PROG-${template.programCode}`,
-    cohorts: template.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
-    target,
-    duration: template.duration,
-    priority: Math.max(25, template.priority - cycle * 2),
-    difficulty: Math.min(10, template.difficulty + (cycle % 2)),
-  };
-});
+    return {
+      code: `${profile.namespace}-${template.code}-${String(cycle + 1).padStart(2, '0')}`,
+      title: `${template.title}${variant}`,
+      programCode: `${profile.namespace}-PROG-${template.programCode}`,
+      cohorts: template.cohorts.map((code) => `${profile.namespace}-PROG-${code}`),
+      target,
+      duration: template.duration,
+      priority: Math.max(25, template.priority - cycle * 2),
+      difficulty: Math.min(10, template.difficulty + (cycle % 2)),
+    };
+  });
+
+  if (profile.candidateFilteringFailureDemo) {
+    // Replace the first offering with the impossible Advanced AI Final.
+    offerings[0] = {
+      code: `${profile.namespace}-ADVAI-01`,
+      title: 'Advanced AI Final',
+      programCode: `${profile.namespace}-PROG-CS`,
+      cohorts: [`${profile.namespace}-PROG-CS`],
+      target: 65,
+      duration: 120,
+      priority: 100,
+      difficulty: 9,
+      notes: 'NO_SPLIT',
+    };
+  }
+
+  return offerings;
 };
 
 const buildCenterSpecs = (profile) => {
@@ -672,10 +773,11 @@ const buildRoomPlans = (profile, centers) => {
   for (const [centerIndex, center] of centers.entries()) {
     const countForCenter = roomsPerCenter + (centerIndex < extraRooms ? 1 : 0);
     for (let localIndex = 0; localIndex < countForCenter; localIndex += 1) {
+      const capacities = profile.candidateFilteringFailureDemo ? [30, 36, 42, 48, 54, 60] : roomCapacityPool;
       roomPlans.push({
         centerCode: center.code,
         name: `${roomNamePool[roomIndex % roomNamePool.length]} ${String(roomIndex + 1).padStart(2, '0')}`,
-        capacity: roomCapacityPool[roomIndex % roomCapacityPool.length],
+        capacity: capacities[roomIndex % capacities.length],
       });
       roomIndex += 1;
     }
@@ -685,6 +787,8 @@ const buildRoomPlans = (profile, centers) => {
 };
 
 const buildTimeSlotSpecs = (profile) => {
+  if (profile.key === 'FAIL2') return failDemo2SlotSpecs;
+  if (profile.constrainedFailureDemo) return [];
   if (profile.feitShowcase) return feitShowcaseSlotSpecs;
   const specs = [];
   const baseDate = new Date(`${profile.semesterStartDate}T00:00:00.000Z`);
@@ -1135,6 +1239,73 @@ const createRegistrations = async (tx, students, offeringByCode, offeringPlans) 
   }
 
   const batchSize = 500;
+  // Enforce per-student and per-offering constraints before persisting:
+  // - per-offering registrations between 5..60 (target was clamped earlier)
+  // - per-student course load between 1..7
+  const offeringIdToTarget = new Map();
+  for (const plan of offeringPlans) {
+    const offering = offeringByCode.get(plan.code);
+    if (offering) offeringIdToTarget.set(offering.id, Math.min(60, Math.max(5, plan.target ?? 5)));
+  }
+
+  // Build counts
+  const studentCount = new Map();
+  const offeringCount = new Map();
+  for (const row of data) {
+    studentCount.set(row.studentId, (studentCount.get(row.studentId) || 0) + 1);
+    offeringCount.set(row.courseOfferingId, (offeringCount.get(row.courseOfferingId) || 0) + 1);
+  }
+
+  // Ensure every student has at least 1 registration
+  for (const student of students) {
+    const cur = studentCount.get(student.id) || 0;
+    if (cur === 0) {
+      // find an offering with available capacity
+      const candidateOffering = [...offeringIdToTarget.entries()].sort((a, b) => (offeringCount.get(a[0]) || 0) - (offeringCount.get(b[0]) || 0)).find(([offId, cap]) => (offeringCount.get(offId) || 0) < cap);
+      if (candidateOffering) {
+        const [offId] = candidateOffering;
+        data.push({ studentId: student.id, courseOfferingId: offId, status: 'ACTIVE' });
+        studentCount.set(student.id, 1);
+        offeringCount.set(offId, (offeringCount.get(offId) || 0) + 1);
+      }
+    }
+  }
+
+  // Ensure no student exceeds 7 registrations: trim excess
+  for (const [studentId, count] of Array.from(studentCount.entries())) {
+    if (count > 7) {
+      let toRemove = count - 7;
+      // remove registrations for this student, prefer offerings with surplus (>5)
+      for (let i = data.length - 1; i >= 0 && toRemove > 0; i -= 1) {
+        const row = data[i];
+        if (row.studentId !== studentId) continue;
+        const offCount = offeringCount.get(row.courseOfferingId) || 0;
+        const offTarget = offeringIdToTarget.get(row.courseOfferingId) || 5;
+        if (offCount > Math.max(5, Math.min(offTarget, 60))) {
+          data.splice(i, 1);
+          offeringCount.set(row.courseOfferingId, offCount - 1);
+          toRemove -= 1;
+        }
+      }
+      // recompute student count
+      studentCount.set(studentId, Math.max(7, count - (count - 7)));
+    }
+  }
+
+  // Ensure offerings have at least 5 registrations; attempt to fill from students who have <7
+  const offeringsNeeding = [...offeringIdToTarget.keys()].filter((offId) => (offeringCount.get(offId) || 0) < 5);
+  for (const offId of offeringsNeeding) {
+    while ((offeringCount.get(offId) || 0) < 5) {
+      // find a student with <7 registrations who is not yet registered to this offering
+      const candidate = students.find((s) => (studentCount.get(s.id) || 0) < 7 && !data.some((d) => d.studentId === s.id && d.courseOfferingId === offId));
+      if (!candidate) break;
+      data.push({ studentId: candidate.id, courseOfferingId: offId, status: 'ACTIVE' });
+      studentCount.set(candidate.id, (studentCount.get(candidate.id) || 0) + 1);
+      offeringCount.set(offId, (offeringCount.get(offId) || 0) + 1);
+    }
+  }
+
+  // Persist in batches
   for (let index = 0; index < data.length; index += batchSize) {
     await tx.registration.createMany({ data: data.slice(index, index + batchSize), skipDuplicates: true });
   }
@@ -1148,6 +1319,19 @@ const getExpectedTestCases = (profile, offeringPlans = []) => {
     ? offeringPlans.filter((plan) => plan.hasExam !== false).length
     : offeringCount;
   const timeSlotCount = buildTimeSlotSpecs(profile).length;
+  if (profile.constrainedFailureDemo) {
+    return {
+      dataset: `${profile.label} - ${profile.description}`,
+      expectedResult: [
+        'No conflict-free schedule exists for current resources/data.',
+      ].join('\n'),
+      offerings: `${offeringCount} active course offerings seeded for ${profile.semesterName} (${examCount} producing exams; PROJECT and LAB-only offerings are excluded).`,
+      rooms: `${profile.roomCount} available rooms distributed across ${profile.centerCount} centers; intentionally constrained to keep generation unschedulable.`,
+      proctors: `${profile.proctorCount} proctors available — intentionally constrained to keep generation unschedulable.`,
+      timeSlots: `${timeSlotCount} valid time slots are available inside the semester exam window; intentionally constrained to keep generation unschedulable.`,
+    };
+  }
+
   return {
     dataset: `${profile.label} - ${profile.description}`,
     expectedResult: profile.feitShowcase

@@ -7,16 +7,17 @@ import { generateSchedule } from '../../src/modules/scheduling/schedulingService
 import prisma, { truncateAll, disconnectPrisma } from '../utils/db.js';
 import { seedFeitScenario } from '../utils/feitSeed.js';
 
-const NO_VALID = 'No valid conflict-free schedule exists for the current data/resources.';
+const NO_VALID_SCHEDULE = 'No conflict-free schedule exists for current resources/data.';
+const NO_VALID_CANDIDATE = 'Exam cannot be assigned.\nNo valid candidate exists.\nGeneration stopped.';
 
-const expectGenerationRejected = async (semesterId) => {
+const expectGenerationRejected = async (semesterId, expectedMessage) => {
   const before = {
     schedules: await prisma.schedule.count(),
     assignments: await prisma.examAssignment.count(),
   };
   await expect(
     generateSchedule({ semesterId, scheduleName: 'should not persist' }),
-  ).rejects.toThrow(NO_VALID);
+  ).rejects.toThrow(expectedMessage);
   const after = {
     schedules: await prisma.schedule.count(),
     assignments: await prisma.examAssignment.count(),
@@ -38,7 +39,7 @@ describe('Hybrid Scheduler — No Valid Resource Scenario', () => {
       namespace: 'FEIT-S2A',
       proctorCount: 0,
     });
-    await expectGenerationRejected(scenario.semester.id);
+    await expectGenerationRejected(scenario.semester.id, NO_VALID_SCHEDULE);
   });
 
   it('rejects generation when there are no time slots in the window', async () => {
@@ -47,7 +48,7 @@ describe('Hybrid Scheduler — No Valid Resource Scenario', () => {
       dayCount: 0,
       sessions: [],
     });
-    await expectGenerationRejected(scenario.semester.id);
+    await expectGenerationRejected(scenario.semester.id, NO_VALID_SCHEDULE);
   });
 
   it('rejects generation when proctors exist but have zero availability', async () => {
@@ -55,7 +56,7 @@ describe('Hybrid Scheduler — No Valid Resource Scenario', () => {
       namespace: 'FEIT-S2C',
       proctorAvailabilityFilter: () => [], // no slots marked available
     });
-    await expectGenerationRejected(scenario.semester.id);
+    await expectGenerationRejected(scenario.semester.id, NO_VALID_CANDIDATE);
   });
 
   it('rejects generation when rooms are starved below required seating', async () => {
@@ -65,6 +66,6 @@ describe('Hybrid Scheduler — No Valid Resource Scenario', () => {
       namespace: 'FEIT-S2D',
       roomFilter: (room) => room.name === 'Computing Lab C101',
     });
-    await expectGenerationRejected(scenario.semester.id);
+    await expectGenerationRejected(scenario.semester.id, NO_VALID_CANDIDATE);
   });
 });

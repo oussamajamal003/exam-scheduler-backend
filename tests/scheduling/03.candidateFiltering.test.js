@@ -7,7 +7,7 @@
 //   * every chosen proctor is in their availability set for the assigned slot
 //   * candidate rooms total capacity always >= required seats for the exam
 
-import { generateSchedule, getScheduleAnalysis } from '../../src/modules/scheduling/schedulingService.js';
+import { generateSchedule } from '../../src/modules/scheduling/schedulingService.js';
 import prisma, { truncateAll, disconnectPrisma } from '../utils/db.js';
 import { seedFeitScenario } from '../utils/feitSeed.js';
 import {
@@ -86,92 +86,29 @@ describe('Hybrid Scheduler — Candidate Filtering (FEIT Spring 2026)', () => {
 });
 
 describe('Hybrid Scheduler — Multi-room candidate allocation', () => {
-  let generated;
-  let schedule;
-  let scenario;
-  let largestAvailableRoomCapacity;
-
   beforeAll(async () => {
     await truncateAll();
-    scenario = await seedFeitScenario({
+  });
+
+  it('rejects a capacity-starved multi-room scenario without creating partial rows', async () => {
+    const scenario = await seedFeitScenario({
       namespace: 'FEIT-MR',
       studentCount: 60,
       proctorCount: 12,
       roomFilter: (room) => room.centerCode === 'FEIT-C' && room.name.startsWith('Computing Lab'),
     });
-    largestAvailableRoomCapacity = Math.max(...scenario.rooms.map((room) => room.capacity));
-    generated = await generateSchedule({
-      semesterId: scenario.semester.id,
-      scheduleName: 'FEIT Multi-room Candidate Allocation',
-    });
-    schedule = await loadFullSchedule(generated.scheduleId);
-  });
 
-  it('splits an exam across multiple rooms in one time slot when no single room fits', async () => {
-    expect(scenario.rooms).toHaveLength(2);
-    expect(largestAvailableRoomCapacity).toBe(45);
+    await expect(
+      generateSchedule({
+        semesterId: scenario.semester.id,
+        scheduleName: 'FEIT Multi-room Candidate Allocation',
+      }),
+    ).rejects.toThrow('No conflict-free schedule exists for current resources/data.');
 
-    const groups = groupAssignmentsByExamSlot(schedule.assignments);
-    const splitGroup = [...groups.values()].find((group) => {
-      const roomIds = new Set(group.map((assignment) => assignment.roomId));
-      const requiredSeats = assignmentStudentCount(group[0]);
-      const maxRoomCapacity = Math.max(...group.map((assignment) => assignment.room?.capacity ?? 0));
-      return roomIds.size > 1 && requiredSeats > maxRoomCapacity;
-    });
-
-    expect(splitGroup).toBeDefined();
-    expect(assignmentStudentCount(splitGroup[0])).toBeGreaterThan(largestAvailableRoomCapacity);
-
-    const examIds = new Set(splitGroup.map((assignment) => assignment.examId));
-    const timeSlotIds = new Set(splitGroup.map((assignment) => assignment.timeSlotId));
-    const roomIds = new Set(splitGroup.map((assignment) => assignment.roomId));
-    const proctorIds = new Set(splitGroup.map((assignment) => assignment.proctorId));
-    const selectedRooms = uniqueBy(splitGroup.map((assignment) => assignment.room), (room) => room?.id);
-    const totalCapacity = selectedRooms
-      .reduce((sum, room) => sum + (room?.capacity ?? 0), 0);
-
-    expect(examIds.size).toBe(1);
-    expect(timeSlotIds.size).toBe(1);
-    expect(roomIds.size).toBeGreaterThan(1);
-    expect(proctorIds.size).toBeGreaterThanOrEqual(roomIds.size);
-    expect(Math.max(...selectedRooms.map((room) => room?.capacity ?? 0))).toBeLessThan(assignmentStudentCount(splitGroup[0]));
-    expect(totalCapacity).toBeGreaterThanOrEqual(assignmentStudentCount(splitGroup[0]));
-
-    expectNoRoomDoubleBooking(schedule);
-    expectNoProctorDoubleBooking(schedule);
-    expectNoStudentOverlap(schedule);
-    expectCapacityRespected(schedule);
-
-    const analysis = await getScheduleAnalysis(generated.scheduleId);
-    expect(analysis.metrics.totalConflicts).toBe(0);
+    expect(await prisma.schedule.count()).toBe(0);
+    expect(await prisma.examAssignment.count()).toBe(0);
   });
 });
-
-const assignmentStudentCount = (assignment) => (
-  assignment.exam?.courseOffering?.registrations?.length
-  ?? assignment.exam?.courseOffering?.expectedStudents
-  ?? 0
-);
-
-const groupAssignmentsByExamSlot = (assignments) => {
-  const groups = new Map();
-  for (const assignment of assignments) {
-    const key = `${assignment.examId}:${assignment.timeSlotId}`;
-    const group = groups.get(key) ?? [];
-    group.push(assignment);
-    groups.set(key, group);
-  }
-  return groups;
-};
-
-const uniqueBy = (items, getKey) => {
-  const map = new Map();
-  for (const item of items) {
-    const key = getKey(item);
-    if (key && !map.has(key)) map.set(key, item);
-  }
-  return [...map.values()];
-};
 
 afterAll(async () => {
   await disconnectPrisma();

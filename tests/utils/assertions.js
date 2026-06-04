@@ -21,7 +21,7 @@ export const loadFullSchedule = async (scheduleId) => {
           },
           room: true,
           timeSlot: true,
-          proctor: true,
+          proctor: { include: { user: true } },
         },
       },
     },

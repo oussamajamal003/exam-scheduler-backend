@@ -1,4 +1,5 @@
 import { clearDemoData, generateDemoData } from '../../src/modules/demoData/demoDataService.js';
+import { generateSchedule, validateInput } from '../../src/modules/scheduling/schedulingService.js';
 import { auditContext } from '../../src/middlewares/auditContext.js';
 import { remove as removeSchedule } from '../../src/modules/schedules/schedulesService.js';
 import prisma, { truncateAll, disconnectPrisma } from '../utils/db.js';
@@ -189,6 +190,98 @@ describe('demo data service', () => {
     expect(generated.summary.proctors).toBe(88);
     expect(generated.summary.timeSlots).toBe(28);
     expect(generated.expectedTestCases?.expectedResult).toMatch(/visible optimization gain/i);
+  });
+
+  it('generates the FAIL demo dataset as a deterministic validation failure fixture', async () => {
+    const generated = await generateDemoData({ dataset: 'FAIL' });
+
+    expect(generated).toMatchObject({
+      dataset: 'FAIL',
+      datasetLabel: 'Fail Demo Dataset',
+    });
+    expect(generated.summary.rooms).toBe(4);
+    expect(generated.summary.proctors).toBe(10);
+    expect(generated.summary.timeSlots).toBe(0);
+    expect(generated.expectedTestCases?.expectedResult).toContain('No conflict-free schedule exists for current resources/data.');
+
+    const failSemester = await prisma.semester.findFirst({
+      where: { createdBy: 'demo-data:FAIL' },
+      select: { id: true },
+    });
+    expect(failSemester).toBeTruthy();
+
+    await expect(
+      generateSchedule({
+        semesterId: failSemester.id,
+        scheduleName: 'FAIL demo should never generate',
+      }),
+    ).rejects.toThrow('No conflict-free schedule exists for current resources/data.');
+
+    expect(await prisma.schedule.count()).toBe(0);
+  });
+
+  it('generates the FAIL2 demo dataset as the constrained 6-slot failure variant', async () => {
+    const generated = await generateDemoData({ dataset: 'FAIL2' });
+
+    expect(generated).toMatchObject({
+      dataset: 'FAIL2',
+      datasetLabel: 'Fail Demo Dataset 2',
+    });
+    expect(generated.summary.rooms).toBe(4);
+    expect(generated.summary.proctors).toBe(20);
+    expect(generated.summary.timeSlots).toBe(6);
+    expect(generated.expectedTestCases?.expectedResult).toContain('No conflict-free schedule exists for current resources/data.');
+
+    const failSemester = await prisma.semester.findFirst({
+      where: { createdBy: 'demo-data:FAIL2' },
+      select: { id: true },
+    });
+    expect(failSemester).toBeTruthy();
+
+    const validation = await validateInput({ semesterId: failSemester.id });
+    expect(validation.errors.roomCapacity).toEqual(['No conflict-free schedule exists for current resources/data.']);
+    expect(validation.groups.roomCapacity.issues).toEqual(['No conflict-free schedule exists for current resources/data.']);
+
+    await expect(
+      generateSchedule({
+        semesterId: failSemester.id,
+        scheduleName: 'FAIL2 demo should never generate',
+      }),
+    ).rejects.toThrow('No conflict-free schedule exists for current resources/data.');
+
+    expect(await prisma.schedule.count()).toBe(0);
+  });
+
+  it('generates the FAIL3 demo dataset as a validation-pass candidate-filtering failure fixture', async () => {
+    const generated = await generateDemoData({ dataset: 'FAIL3' });
+
+    expect(generated).toMatchObject({
+      dataset: 'FAIL3',
+      datasetLabel: 'Fail Demo Dataset 3',
+    });
+    expect(generated.summary.exams).toBe(30);
+    expect(generated.summary.rooms).toBe(20);
+    expect(generated.summary.proctors).toBe(80);
+    expect(generated.summary.timeSlots).toBe(25);
+
+    const failSemester = await prisma.semester.findFirst({
+      where: { createdBy: 'demo-data:FAIL3' },
+      select: { id: true },
+    });
+    expect(failSemester).toBeTruthy();
+
+    const validation = await validateInput({ semesterId: failSemester.id });
+    expect(validation.isValid).toBe(true);
+    expect(validation.ready).toBe(true);
+
+    await expect(
+      generateSchedule({
+        semesterId: failSemester.id,
+        scheduleName: 'FAIL3 demo should stop in candidate filtering',
+      }),
+    ).rejects.toThrow('Exam cannot be assigned.\nNo valid candidate exists.\nGeneration stopped.');
+
+    expect(await prisma.schedule.count()).toBe(0);
   });
 
   it('still clears a dataset that has no schedules', async () => {
