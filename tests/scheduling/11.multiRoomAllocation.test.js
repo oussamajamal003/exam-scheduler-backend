@@ -72,7 +72,7 @@ const seedMultiRoomScenario = async (namespace) => {
     },
   });
 
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     const user = await prisma.user.create({
       data: {
         name: `Multi-room Proctor ${namespace} ${index + 1}`,
@@ -194,7 +194,7 @@ describe('Hybrid Scheduler — Multi-room candidate allocation', () => {
       (assignment) => assignment.exam.courseOfferingId === scenario.offering.id,
     );
 
-    expect(targetAssignments).toHaveLength(4);
+    expect(targetAssignments).toHaveLength(5);
     expect(new Set(targetAssignments.map((assignment) => assignment.roomId)).size).toBe(2);
     expect(new Set(targetAssignments.map((assignment) => assignment.timeSlotId)).size).toBe(1);
     expectNoRoomDoubleBooking(schedule);

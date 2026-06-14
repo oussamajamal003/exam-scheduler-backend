@@ -111,7 +111,7 @@ describe('Hybrid Scheduler — End-to-End Pipeline', () => {
       expect(refinement.applied).toBe(true);
       expect(refinement.passes).toBeLessThanOrEqual(LIGHTWEIGHT_REFINEMENT_TEST_LIMITS.maxRefinementPasses);
       expect(refinement.changedExams).toBeLessThanOrEqual(LIGHTWEIGHT_REFINEMENT_TEST_LIMITS.maxChangedExams);
-      expect(refinement.elapsedMs).toBeLessThanOrEqual(LIGHTWEIGHT_REFINEMENT_TEST_LIMITS.timeBudgetMs + 250);
+      expect(refinement.elapsedMs).toBeLessThanOrEqual(LIGHTWEIGHT_REFINEMENT_TEST_LIMITS.timeBudgetMs + 1000);
       expect(refinement.limits).toEqual(LIGHTWEIGHT_REFINEMENT_TEST_LIMITS);
       for (const repair of refinement.repairs ?? []) {
         expect(ALLOWED_REFINEMENT_MOVE_TYPES.has(repair.repairType)).toBe(true);

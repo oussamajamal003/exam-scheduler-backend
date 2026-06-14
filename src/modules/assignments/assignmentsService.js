@@ -299,27 +299,30 @@ const validateSlotWindow = (timeSlot, semester, examDuration) => {
 };
 
 const validateRoomCapacity = async ({ scheduleId, assignmentId, room, examId, timeSlotId }) => {
-  const enrolledCount = await prisma.registration.count({
-    where: { courseOffering: { exams: { some: { id: examId } } } },
-  });
-  const siblingAssignments = await prisma.examAssignment.findMany({
+  const roomSlotAssignments = await prisma.examAssignment.findMany({
     where: {
       scheduleId,
-      examId,
+      roomId: room.id,
       timeSlotId,
       NOT: { id: assignmentId },
     },
-    select: { room: { select: { id: true, name: true, capacity: true } } },
+    select: {
+      examId: true,
+      exam: { select: { courseOffering: { select: { registrations: { select: { studentId: true, status: true } } } } } },
+    },
   });
-  const uniqueRooms = new Map([[room.id, room]]);
-  for (const assignment of siblingAssignments) {
-    if (assignment.room?.id) uniqueRooms.set(assignment.room.id, assignment.room);
+  const uniqueExamIds = new Set([examId, ...roomSlotAssignments.map((assignment) => assignment.examId)].filter(Boolean));
+  let totalStudentsInRoomSlot = 0;
+  for (const currentExamId of uniqueExamIds) {
+    const examEnrollmentCount = await prisma.registration.count({
+      where: { courseOffering: { exams: { some: { id: currentExamId } } } },
+    });
+    totalStudentsInRoomSlot += examEnrollmentCount;
   }
-  const totalCapacity = [...uniqueRooms.values()].reduce((sum, item) => sum + (item.capacity ?? 0), 0);
 
-  if (totalCapacity < enrolledCount) {
+  if (totalStudentsInRoomSlot > room.capacity) {
     throw new AppError(
-      `Selected room allocation capacity (${totalCapacity}) is below enrolled student count (${enrolledCount}).`,
+      `Selected room allocation occupancy (${totalStudentsInRoomSlot}) exceeds room capacity (${room.capacity}).`,
       400
     );
   }
@@ -329,7 +332,7 @@ const validateRoomAvailability = async ({ scheduleId, roomId, timeSlotId, assign
   const clash = await prisma.examAssignment.findFirst({
     where: {
       roomId,
-      timeSlotId,
+      timeSlotId: { not: timeSlotId },
       NOT: { id: assignmentId },
       OR: [{ scheduleId }, { schedule: { isFinal: true } }],
       ...(examId ? { examId: { not: examId } } : {}),
@@ -351,6 +354,7 @@ const validateRoomTemporalAvailability = async ({ scheduleId, roomId, timeSlot, 
       NOT: { id: assignmentId },
       OR: [{ scheduleId }, { schedule: { isFinal: true } }],
       ...(examId ? { examId: { not: examId } } : {}),
+      timeSlotId: { not: timeSlot.id },
       timeSlot: {
         startTime: { lt: timeSlot.endTime },
         endTime: { gt: timeSlot.startTime },
@@ -369,6 +373,7 @@ const validateProctorAvailability = async ({
   scheduleId,
   proctorId,
   timeSlotId,
+  roomId,
   assignmentId,
 }) => {
   await assertProctorAvailableForTimeSlot({ proctorId, timeSlotId });
@@ -377,6 +382,7 @@ const validateProctorAvailability = async ({
     where: {
       proctorId,
       timeSlotId,
+      roomId: { not: roomId },
       NOT: { id: assignmentId },
       OR: [{ scheduleId }, { schedule: { isFinal: true } }],
     },
@@ -394,10 +400,11 @@ const validateProctorAvailability = async ({
   }
 };
 
-const validateProctorTemporalAvailability = async ({ scheduleId, proctorId, timeSlot, assignmentId }) => {
+const validateProctorTemporalAvailability = async ({ scheduleId, proctorId, roomId, timeSlot, assignmentId }) => {
   const clashes = await prisma.examAssignment.findMany({
     where: {
       proctorId,
+      roomId: { not: roomId },
       NOT: { id: assignmentId },
       OR: [{ scheduleId }, { schedule: { isFinal: true } }],
       timeSlot: {
@@ -414,25 +421,34 @@ const validateProctorTemporalAvailability = async ({ scheduleId, proctorId, time
   }
 };
 
-const validateRequiredProctorCount = async ({ scheduleId, assignmentId, examId, timeSlotId, proctorId }) => {
-  const enrolledCount = await prisma.registration.count({
-    where: { courseOffering: { exams: { some: { id: examId } } } },
-  });
-  const requiredProctors = computeRequiredProctors(enrolledCount);
-  const siblingAssignments = await prisma.examAssignment.findMany({
+const validateRequiredProctorCount = async ({ scheduleId, assignmentId, roomId, timeSlotId, proctorId }) => {
+  const roomSlotAssignments = await prisma.examAssignment.findMany({
     where: {
       scheduleId,
-      examId,
+      roomId,
       timeSlotId,
       NOT: { id: assignmentId },
     },
-    select: { proctorId: true },
+    select: {
+      examId: true,
+      proctorId: true,
+      exam: { select: { courseOffering: { select: { registrations: { select: { studentId: true, status: true } } } } } },
+    },
   });
-  const uniqueProctorIds = new Set([proctorId, ...siblingAssignments.map((assignment) => assignment.proctorId)].filter(Boolean));
+  const uniqueExamIds = new Set(roomSlotAssignments.map((assignment) => assignment.examId).filter(Boolean));
+  let totalStudentsInRoomSlot = 0;
+  for (const currentExamId of uniqueExamIds) {
+    const enrolledCount = await prisma.registration.count({
+      where: { courseOffering: { exams: { some: { id: currentExamId } } } },
+    });
+    totalStudentsInRoomSlot += enrolledCount;
+  }
+  const requiredProctors = computeRequiredProctors(totalStudentsInRoomSlot);
+  const uniqueProctorIds = new Set([proctorId, ...roomSlotAssignments.map((assignment) => assignment.proctorId)].filter(Boolean));
 
   if (uniqueProctorIds.size < requiredProctors) {
     throw new AppError(
-      `Selected assignment would provide ${uniqueProctorIds.size} proctor${uniqueProctorIds.size === 1 ? '' : 's'}, but this exam requires ${requiredProctors} based on ${enrolledCount} enrolled student${enrolledCount === 1 ? '' : 's'}.`,
+      `Selected room-slot would provide ${uniqueProctorIds.size} proctor${uniqueProctorIds.size === 1 ? '' : 's'}, but this shared room-slot requires ${requiredProctors} based on ${totalStudentsInRoomSlot} enrolled student${totalStudentsInRoomSlot === 1 ? '' : 's'}.`,
       400,
     );
   }
@@ -1320,15 +1336,16 @@ export const update = async (scheduleId, assignmentId, payload) => {
   await validateProctorAvailability({
     scheduleId,
     proctorId: effective.proctorId,
+    roomId: effective.roomId,
     timeSlotId: effective.timeSlotId,
     assignmentId,
   });
-  await validateProctorTemporalAvailability({ scheduleId, proctorId: effective.proctorId, timeSlot, assignmentId });
+  await validateProctorTemporalAvailability({ scheduleId, proctorId: effective.proctorId, roomId: effective.roomId, timeSlot, assignmentId });
   await validateProctorDailyLoad({ scheduleId, proctor, timeSlot, assignmentId });
   await validateRequiredProctorCount({
     scheduleId,
     assignmentId,
-    examId: effective.examId,
+    roomId: effective.roomId,
     timeSlotId: effective.timeSlotId,
     proctorId: effective.proctorId,
   });

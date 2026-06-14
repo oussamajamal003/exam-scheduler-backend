@@ -250,6 +250,7 @@ const buildScheduleIssueSummary = async (schedule, client) => {
   );
 
   const examGroups = new Map();
+  const roomSlotGroups = new Map();
   const invalidRoomAssignments = new Set();
   const invalidProctorAvailability = new Set();
   const invalidSlotWindowAssignments = new Set();
@@ -300,6 +301,21 @@ const buildScheduleIssueSummary = async (schedule, client) => {
     };
     group.proctorIds.add(assignment.proctorId);
     examGroups.set(groupKey, group);
+
+    const roomSlotKey = `${assignment.roomId}:${assignment.timeSlotId}`;
+    const roomSlotGroup = roomSlotGroups.get(roomSlotKey) ?? {
+      roomId: assignment.roomId,
+      timeSlotId: assignment.timeSlotId,
+      assignments: [],
+      canonicalProctorIds: new Set(),
+      examProctorIds: new Map(),
+    };
+    roomSlotGroup.assignments.push(assignment);
+    roomSlotGroup.canonicalProctorIds.add(assignment.proctorId);
+    const examRoomSet = roomSlotGroup.examProctorIds.get(assignment.examId) ?? new Set();
+    examRoomSet.add(assignment.proctorId);
+    roomSlotGroup.examProctorIds.set(assignment.examId, examRoomSet);
+    roomSlotGroups.set(roomSlotKey, roomSlotGroup);
   }
 
   let missingExamAssignments = 0;
@@ -322,14 +338,36 @@ const buildScheduleIssueSummary = async (schedule, client) => {
   }
 
   let requiredProctorShortage = 0;
-  for (const group of examGroups.values()) {
-    const required = getRequiredProctorCount(group.exam);
-    if (group.proctorIds.size < required) {
-      requiredProctorShortage += required - group.proctorIds.size;
+  for (const group of roomSlotGroups.values()) {
+    const totalStudentsInRoomSlot = group.assignments.reduce((sum, assignment) => (
+      sum + getRequiredSeatsForExam(assignment.exam)
+    ), 0);
+    const required = computeRequiredProctors(totalStudentsInRoomSlot);
+    if (group.canonicalProctorIds.size < required) {
+      requiredProctorShortage += required - group.canonicalProctorIds.size;
     }
   }
 
   const analysis = await getScheduleAnalysis(schedule.id, client);
+  const roomSlotDivergences = [...roomSlotGroups.values()]
+    .map((group) => {
+      for (const [examId, proctorSet] of group.examProctorIds.entries()) {
+        const canonical = [...group.canonicalProctorIds].sort();
+        const examProctors = [...proctorSet].sort();
+        const mismatch = canonical.length !== examProctors.length || canonical.some((proctorId, index) => proctorId !== examProctors[index]);
+        if (mismatch) {
+          return {
+            roomId: group.roomId,
+            timeSlotId: group.timeSlotId,
+            canonicalProctorIds: canonical,
+            examId,
+            examProctorIds: examProctors,
+          };
+        }
+      }
+      return null;
+    })
+    .filter(Boolean);
   const hardConstraintScore =
     analysis.metrics.totalConflicts
     + invalidRoomAssignments.size
@@ -360,6 +398,16 @@ const buildScheduleIssueSummary = async (schedule, client) => {
         invalidSlotWindowAssignments: invalidSlotWindowAssignments.size,
         requiredProctorShortage,
         derivedConflicts: analysis.metrics.totalConflicts,
+        roomSlotDivergenceCount: roomSlotDivergences.length,
+        conflictBreakdown: {
+          roomCapacityViolations: analysis.conflicts.derived.roomCapacityViolations.length,
+          roomReuseViolations: analysis.conflicts.derived.roomReuseViolations.length,
+          proctorConflicts: analysis.conflicts.derived.proctorConflicts.length,
+          proctorDailyLoadViolations: analysis.conflicts.derived.proctorDailyLoadViolations.length,
+          sharedRoomProctorGroupViolations: analysis.conflicts.derived.sharedRoomProctorGroupViolations.length,
+          studentOverlaps: analysis.conflicts.derived.studentOverlaps.length,
+        },
+        roomSlotDivergences: roomSlotDivergences.slice(0, 10),
       },
     },
   };

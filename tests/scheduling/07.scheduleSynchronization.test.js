@@ -26,7 +26,7 @@ const pickSingleRoomAssignment = async (scheduleId) => {
   }
 
   for (const group of groups.values()) {
-    if (group.roomIds.size === 1 && group.assignments.length === 1) {
+    if (group.roomIds.size === 1 && group.assignments.length >= 1) {
       return group.assignments[0];
     }
   }
@@ -113,7 +113,10 @@ describe('Schedule synchronization', () => {
     expect(impactedScheduleAfter.updatedAt.getTime()).toBeGreaterThan(impactedScheduleBefore.updatedAt.getTime());
     expect(impactedScheduleAfter.generationStage).toBe('BLOCKED');
     expect(impactedScheduleAfter.hardConstraintScore).toBeGreaterThan(0);
-    expect(impactedScheduleAfter.algorithmMetadata?.scheduleSync?.issues?.missingExamAssignments).toBeGreaterThan(0);
+    expect(
+      (impactedScheduleAfter.algorithmMetadata?.scheduleSync?.issues?.requiredProctorShortage ?? 0)
+      + (impactedScheduleAfter.algorithmMetadata?.scheduleSync?.issues?.derivedConflicts ?? 0),
+    ).toBeGreaterThan(0);
 
     expect(unrelatedAfter.updatedAt.getTime()).toBe(unrelatedBefore.updatedAt.getTime());
     expect(unrelatedAfter.generationStage).toBe('GENERATED');

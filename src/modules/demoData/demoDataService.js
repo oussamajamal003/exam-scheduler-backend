@@ -4,7 +4,7 @@ import { AppError } from '../../utils/AppError.js';
 
 const DEMO_PREFIX = 'DEMO-';
 const DEMO_PASSWORD = 'Demo12345!';
-const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL', 'FEIT2027', 'FAIL', 'FAIL2', 'FAIL3'];
+const DEMO_DATASET_KEYS = ['A', 'B', 'C', 'REAL', 'FEIT2027', 'SCALABILITY', 'FAIL', 'FAIL2', 'FAIL3'];
 
 const departmentTemplates = [
   { name: 'Computer Science', code: 'CS' },
@@ -182,6 +182,24 @@ const datasetProfiles = {
     targetScale: 1,
     maxOfferingTarget: 180,
     feitShowcase: true,
+  },
+  SCALABILITY: {
+    key: 'SCALABILITY',
+    namespace: 'DEMO-SCALABILITY',
+    label: 'Large Dataset Scalability',
+    description: 'Large-scale dataset with 100+ offerings, 1,000+ students, 50+ rooms, 80+ proctors, and 30+ time slots for performance testing.',
+    semesterName: 'Large Dataset Scalability Test',
+    semesterStartDate: '2027-06-01',
+    semesterEndDate: '2027-06-14',
+    academicYear: '2026-2027',
+    studentCount: 1080,
+    proctorCount: 88,
+    centerCount: 6,
+    roomCount: 58,
+    offeringCount: 104,
+    slotDays: 6,
+    targetScale: 1.1,
+    maxOfferingTarget: 190,
   },
   FAIL: {
     key: 'FAIL',
