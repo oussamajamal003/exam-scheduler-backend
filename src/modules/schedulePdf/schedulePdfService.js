@@ -12,13 +12,43 @@ const sortByDate = (assignments) =>
     return (Number.isFinite(ta) ? ta : Infinity) - (Number.isFinite(tb) ? tb : Infinity);
   });
 
-const dedupeByExamSlot = (assignments) => {
-  const seen = new Map();
-  for (const a of assignments) {
-    const key = `${a.examId}:${a.timeSlotId}`;
-    if (!seen.has(key)) seen.set(key, a);
+export const groupAssignmentsByExamSlot = (assignments) => {
+  const groups = new Map();
+
+  for (const assignment of assignments) {
+    const key = `${assignment.examId}:${assignment.timeSlotId}`;
+    const group = groups.get(key) ?? [];
+    group.push(assignment);
+    groups.set(key, group);
   }
-  return Array.from(seen.values());
+
+  return Array.from(groups.values()).map((group) => {
+    const primary = group[0];
+    const roomIds = [...new Set(group.map((assignment) => assignment.roomId).filter(Boolean))];
+    const proctorIds = [...new Set(group.map((assignment) => assignment.proctorId).filter(Boolean))];
+    const roomNames = [...new Set(group.map((assignment) => assignment.room?.name).filter(Boolean))];
+    const centerNames = [...new Set(group.map((assignment) => assignment.room?.center?.name).filter(Boolean))];
+    const proctorNames = [...new Set(group.map((assignment) => assignment.proctor?.user?.name).filter(Boolean))];
+
+    return {
+      ...primary,
+      roomIds,
+      proctorIds,
+      roomDisplayName: roomNames.length > 1 ? `${roomNames.length} rooms assigned` : roomNames[0] ?? '',
+      centerDisplayName: centerNames.length > 1 ? `${centerNames.length} centers assigned` : centerNames[0] ?? '',
+      proctorDisplayName: proctorNames.length > 1 ? `${proctorNames.length} proctors assigned` : proctorNames[0] ?? '',
+      assignmentRowCount: group.length,
+    };
+  });
+};
+
+const getGroupedAssignments = (assignments) => sortByDate(groupAssignmentsByExamSlot(assignments ?? []));
+
+const isUpcomingAssignment = (assignment) => {
+  const value = assignment.timeSlot?.startTime ?? assignment.timeSlot?.date;
+  if (!value) return false;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && time >= Date.now();
 };
 
 const formatDate = (value) => {
@@ -104,9 +134,9 @@ const buildAdminRow = (a) => ({
   course: courseText(a),
   date: formatDate(a.timeSlot?.date ?? a.timeSlot?.startTime),
   time: timeRange(a),
-  room: a.room?.name ?? '',
-  center: a.room?.center?.name ?? '',
-  proctor: a.proctor?.user?.name ?? '',
+  room: a.roomDisplayName ?? a.room?.name ?? '',
+  center: a.centerDisplayName ?? a.room?.center?.name ?? '',
+  proctor: a.proctorDisplayName ?? a.proctor?.user?.name ?? '',
   students:
     a.exam?.courseOffering?.registrations?.length ??
     a.exam?.courseOffering?.expectedStudents ??
@@ -118,9 +148,9 @@ const buildStudentRow = (a) => ({
   course: courseText(a),
   date: formatDate(a.timeSlot?.date ?? a.timeSlot?.startTime),
   time: timeRange(a),
-  room: a.room?.name ?? '',
-  center: a.room?.center?.name ?? '',
-  proctor: a.proctor?.user?.name ?? '',
+  room: a.roomDisplayName ?? a.room?.name ?? '',
+  center: a.centerDisplayName ?? a.room?.center?.name ?? '',
+  proctor: a.proctorDisplayName ?? a.proctor?.user?.name ?? '',
   duration: durationText(a),
 });
 
@@ -128,8 +158,8 @@ const buildProctorRow = (a) => ({
   course: courseText(a),
   date: formatDate(a.timeSlot?.date ?? a.timeSlot?.startTime),
   time: timeRange(a),
-  room: a.room?.name ?? '',
-  center: a.room?.center?.name ?? '',
+  room: a.roomDisplayName ?? a.room?.name ?? '',
+  center: a.centerDisplayName ?? a.room?.center?.name ?? '',
   students:
     a.exam?.courseOffering?.registrations?.length ??
     a.exam?.courseOffering?.expectedStudents ??
@@ -150,10 +180,10 @@ export const streamAdminSchedulePdf = async (res, scheduleId) => {
   const schedule = await schedulesService.getById(scheduleId);
   assertPublished(schedule);
 
-  const assignments = sortByDate(schedule.assignments ?? []);
+  const assignments = getGroupedAssignments(schedule.assignments ?? []);
   const uniqueExams = new Set(assignments.map((a) => a.examId));
-  const uniqueRooms = new Set(assignments.map((a) => a.roomId).filter(Boolean));
-  const uniqueProctors = new Set(assignments.map((a) => a.proctorId).filter(Boolean));
+  const uniqueRooms = new Set(assignments.flatMap((a) => a.roomIds ?? [a.roomId]).filter(Boolean));
+  const uniqueProctors = new Set(assignments.flatMap((a) => a.proctorIds ?? [a.proctorId]).filter(Boolean));
 
   streamScheduleReport(res, {
     fileName: `schedule-${slugify(schedule.name)}.pdf`,
@@ -175,7 +205,7 @@ export const streamAdminSchedulePdf = async (res, scheduleId) => {
 
 export const streamStudentSchedulePdf = async (res, user) => {
   const dashboard = await roleDashboardService.getStudentDashboard(user);
-  const assignments = sortByDate(dashboard.assignments ?? []);
+  const assignments = getGroupedAssignments(dashboard.assignments ?? []);
   const profile = dashboard.profile;
 
   streamScheduleReport(res, {
@@ -189,8 +219,8 @@ export const streamStudentSchedulePdf = async (res, user) => {
       ? `Prepared for ${profile.user?.name ?? 'Student'}${profile.universityId ? ` (ID: ${profile.universityId})` : ''}${profile.program?.name ? ` — ${profile.program.name}` : ''}`
       : null,
     summary: [
-      { label: 'Total Exams', value: dashboard.summary?.scheduledExams ?? assignments.length },
-      { label: 'Upcoming', value: dashboard.summary?.upcomingExams ?? 0 },
+      { label: 'Total Exams', value: assignments.length },
+      { label: 'Upcoming', value: assignments.filter(isUpcomingAssignment).length },
       { label: 'Registered Courses', value: dashboard.summary?.registeredCourses ?? 0 },
     ],
     columns: studentColumns,
@@ -200,7 +230,7 @@ export const streamStudentSchedulePdf = async (res, user) => {
 
 export const streamProctorSchedulePdf = async (res, user) => {
   const dashboard = await roleDashboardService.getProctorDashboard(user);
-  const assignments = sortByDate(dashboard.assignments ?? []);
+  const assignments = getGroupedAssignments(dashboard.assignments ?? []);
   const profile = dashboard.profile;
 
   streamScheduleReport(res, {
@@ -214,8 +244,8 @@ export const streamProctorSchedulePdf = async (res, user) => {
       ? `Prepared for ${profile.user?.name ?? 'Proctor'}${profile.department ? ` — ${profile.department}` : ''}${profile.center?.name ? ` — ${profile.center.name}` : ''}`
       : null,
     summary: [
-      { label: 'Assigned Duties', value: dashboard.summary?.assignedDuties ?? assignments.length },
-      { label: 'Upcoming', value: dashboard.summary?.upcomingDuties ?? 0 },
+      { label: 'Assigned Duties', value: assignments.length },
+      { label: 'Upcoming', value: assignments.filter(isUpcomingAssignment).length },
       { label: 'Related Students', value: dashboard.summary?.relatedStudents ?? 0 },
       { label: 'Centers', value: dashboard.summary?.centers ?? 0 },
     ],
@@ -239,21 +269,19 @@ const collectFullPublished = async (scheduleId) => {
 
 export const streamFullPublishedSchedulePdf = async (res, { scheduleId, scopeLabel }) => {
   const schedules = await collectFullPublished(scheduleId);
-  const flattened = dedupeByExamSlot(
-    sortByDate(
-      schedules.flatMap((schedule) =>
-        (schedule.assignments ?? []).map((assignment) => ({
-          ...assignment,
-          schedule: assignment.schedule ?? schedule,
-        }))
-      )
+  const flattened = getGroupedAssignments(
+    schedules.flatMap((schedule) =>
+      (schedule.assignments ?? []).map((assignment) => ({
+        ...assignment,
+        schedule: assignment.schedule ?? schedule,
+      }))
     )
   );
 
   const firstSchedule = schedules[0];
   const uniqueExams = new Set(flattened.map((a) => a.examId));
-  const uniqueRooms = new Set(flattened.map((a) => a.roomId).filter(Boolean));
-  const uniqueProctors = new Set(flattened.map((a) => a.proctorId).filter(Boolean));
+  const uniqueRooms = new Set(flattened.flatMap((a) => a.roomIds ?? [a.roomId]).filter(Boolean));
+  const uniqueProctors = new Set(flattened.flatMap((a) => a.proctorIds ?? [a.proctorId]).filter(Boolean));
   const uniqueSchedules = new Set(flattened.map((a) => a.schedule?.id).filter(Boolean));
 
   streamScheduleReport(res, {
